@@ -199,6 +199,186 @@ function teamPoints(r) {
   return pts;
 }
 
+// ---------- Live feed: provider -> pool mapping & scoring derivation ----------
+// The `live` payload is written to Supabase by scripts/sync-results.mjs and has
+// the shape: { updatedAt, source, matches:[...], standings:[...] }.
+
+function normTeamName(s) {
+  return (s || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .replace(/[^a-z ]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+// Safety net for the few teams whose feed name doesn't obviously match our
+// label. The three-letter code is tried first and usually matches the FIFA
+// tla, so this only catches the stragglers.
+const NAME_ALIASES = {
+  "korea republic": "KOR",
+  "south korea": "KOR",
+  "ivory coast": "CIV",
+  "cote divoire": "CIV",
+  turkiye: "TUR",
+  turkey: "TUR",
+  "united states": "USA",
+  usa: "USA",
+  "dr congo": "COD",
+  "congo dr": "COD",
+  "democratic republic of congo": "COD",
+  "cape verde": "CPV",
+  "cabo verde": "CPV",
+  czechia: "CZE",
+  "czech republic": "CZE",
+  "bosnia and herzegovina": "BIH",
+  "bosnia herzegovina": "BIH",
+  "saudi arabia": "KSA",
+  "south africa": "RSA",
+  "new zealand": "NZL",
+};
+
+const POOL_NAME_TO_ID = {};
+Object.values(ALL_TEAMS).forEach((t) => {
+  POOL_NAME_TO_ID[normTeamName(t.name)] = t.id;
+});
+
+// Feed three-letter codes that differ from our pool ids. football-data uses
+// URY for Uruguay where we use URU; the name fallback also catches it, this is
+// just belt-and-suspenders.
+const CODE_ALIASES = { URY: "URU" };
+
+// Resolve a feed team (code + name) to a pool team id, or null if it isn't one
+// of our 48 (the Results tab still shows it, it just isn't highlighted).
+function liveTeamToId(code, name) {
+  if (code) {
+    const c = code.toUpperCase();
+    if (ALL_TEAMS[c]) return c;
+    if (CODE_ALIASES[c]) return CODE_ALIASES[c];
+  }
+  const n = normTeamName(name);
+  if (n) {
+    if (POOL_NAME_TO_ID[n]) return POOL_NAME_TO_ID[n];
+    if (NAME_ALIASES[n]) return NAME_ALIASES[n];
+  }
+  return null;
+}
+
+const STAGE_TO_KO = {
+  LAST_32: "r32",
+  ROUND_OF_32: "r32",
+  LAST_16: "r16",
+  ROUND_OF_16: "r16",
+  QUARTER_FINALS: "qf",
+  QUARTER_FINAL: "qf",
+  SEMI_FINALS: "sf",
+  SEMI_FINAL: "sf",
+  THIRD_PLACE: "tp",
+  PLAY_OFF_FOR_THIRD_PLACE: "tp",
+  FINAL: "f",
+};
+
+const STAGE_LABELS = {
+  GROUP_STAGE: "Group stage",
+  LAST_32: "Round of 32",
+  ROUND_OF_32: "Round of 32",
+  LAST_16: "Round of 16",
+  ROUND_OF_16: "Round of 16",
+  QUARTER_FINALS: "Quarterfinals",
+  SEMI_FINALS: "Semifinals",
+  THIRD_PLACE: "Third-place match",
+  PLAY_OFF_FOR_THIRD_PLACE: "Third-place match",
+  FINAL: "Final",
+};
+
+function timeAgo(iso) {
+  if (!iso) return "";
+  const ms = Date.now() - new Date(iso).getTime();
+  const mins = Math.floor(ms / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  return `${Math.floor(hrs / 24)}d ago`;
+}
+
+// Turn the live feed into the per-team results shape the pool scores on. Group
+// W/D and finish come from the standings (including the 2026 "8 best third-place
+// teams advance" rule); knockout wins come from finished knockout matches.
+// Nothing is auto-committed — the commissioner reviews this in the form and
+// hits Save. `prev` seeds the output so manual edits aren't clobbered for teams
+// the feed has nothing to say about yet.
+function deriveResults(live, prev) {
+  const out = {};
+  Object.keys(ALL_TEAMS).forEach((id) => {
+    out[id] =
+      prev && prev[id] ? JSON.parse(JSON.stringify(prev[id])) : blankResult();
+  });
+  if (!live) return out;
+
+  // --- Group stage from standings ---
+  const meta = {}; // id -> { pos, played }
+  const thirds = [];
+  (live.standings || []).forEach((g) => {
+    (g.table || []).forEach((row) => {
+      const id = liveTeamToId(row.code, row.name);
+      if (!id || !out[id]) return;
+      out[id].gw = Math.min(3, row.won || 0);
+      out[id].gd = Math.min(3, row.draw || 0);
+      meta[id] = { pos: row.position, played: row.played || 0 };
+      if (row.position === 3)
+        thirds.push({
+          id,
+          points: row.points || 0,
+          gd: row.gd || 0,
+          gf: row.gf || 0,
+          played: row.played || 0,
+        });
+    });
+  });
+
+  // Best 8 of the 12 third-place teams advance. Only rank teams that have
+  // finished all three group games so a mid-round table can't crown a third.
+  const advancingThirds = new Set(
+    thirds
+      .filter((t) => t.played >= 3)
+      .sort((a, b) => b.points - a.points || b.gd - a.gd || b.gf - a.gf)
+      .slice(0, 8)
+      .map((t) => t.id)
+  );
+
+  Object.keys(out).forEach((id) => {
+    const m = meta[id];
+    if (!m) return; // not in any group table yet; leave as-is
+    if (m.played < 3) out[id].finish = ""; // group still in progress
+    else if (m.pos === 1) out[id].finish = "winner";
+    else if (m.pos === 2) out[id].finish = "runnerup";
+    else if (m.pos === 3)
+      out[id].finish = advancingThirds.has(id) ? "third" : "out";
+    else out[id].finish = "out";
+  });
+
+  // --- Knockout wins from finished matches ---
+  (live.matches || []).forEach((mt) => {
+    const ko = STAGE_TO_KO[mt.stage];
+    if (!ko || mt.status !== "FINISHED") return;
+    let side = mt.winner; // HOME | AWAY | DRAW | null
+    if (side !== "HOME" && side !== "AWAY") {
+      if (mt.homeScore != null && mt.awayScore != null) {
+        if (mt.homeScore > mt.awayScore) side = "HOME";
+        else if (mt.awayScore > mt.homeScore) side = "AWAY";
+      }
+    }
+    if (side !== "HOME" && side !== "AWAY") return;
+    const t = side === "HOME" ? mt.home : mt.away;
+    const id = liveTeamToId(t && t.code, t && t.name);
+    if (id && out[id]) out[id].ko = { ...out[id].ko, [ko]: true };
+  });
+
+  return out;
+}
+
 function entryTeamIds(entry) {
   // Picks are stored per tier. New entries use arrays for every tier; older
   // entries may have a bare string for single-pick tiers — handle both.
@@ -795,6 +975,200 @@ function LeaderboardView({ results, settings, locked }) {
   );
 }
 
+// ---------- Results (live feed) ----------
+
+function MatchRow({ m }) {
+  const live = m.status === "IN_PLAY" || m.status === "PAUSED";
+  const done = m.status === "FINISHED";
+  const hp = !!liveTeamToId(m.home && m.home.code, m.home && m.home.name);
+  const ap = !!liveTeamToId(m.away && m.away.code, m.away && m.away.name);
+  const hasScore = (live || done) && m.homeScore != null && m.awayScore != null;
+  const when = new Date(m.utcDate).toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+  const meta =
+    (live ? "LIVE" : done ? "FT" : when) +
+    (m.group ? " · " + m.group.replace("GROUP_", "Group ") : "");
+  return (
+    <div className="py-2 border-b border-stone-100 last:border-0">
+      <div className="flex items-center gap-2">
+        <span
+          className={
+            "flex-1 text-right text-sm " +
+            (hp ? "font-bold text-emerald-900" : "text-stone-700")
+          }
+        >
+          {(m.home && m.home.name) || "TBD"}
+        </span>
+        <span
+          className={
+            "px-2 py-0.5 rounded font-mono text-sm tabular-nums " +
+            (live
+              ? "bg-red-600 text-white"
+              : done
+              ? "bg-stone-800 text-white"
+              : "text-stone-400")
+          }
+        >
+          {hasScore ? `${m.homeScore}–${m.awayScore}` : "v"}
+        </span>
+        <span
+          className={
+            "flex-1 text-sm " +
+            (ap ? "font-bold text-emerald-900" : "text-stone-700")
+          }
+        >
+          {(m.away && m.away.name) || "TBD"}
+        </span>
+      </div>
+      <div className="text-center text-[11px] text-stone-400 mt-0.5">{meta}</div>
+    </div>
+  );
+}
+
+function GroupTable({ g }) {
+  return (
+    <div className="bg-white border border-stone-200 rounded-xl p-3 mb-3">
+      <div className="text-xs font-bold text-stone-500 uppercase tracking-wide mb-1">
+        Group {g.group}
+      </div>
+      <table className="w-full text-sm">
+        <thead>
+          <tr className="text-[11px] text-stone-400">
+            <th className="text-left font-medium py-1">Team</th>
+            <th className="w-6 text-center font-medium">P</th>
+            <th className="w-6 text-center font-medium">W</th>
+            <th className="w-6 text-center font-medium">D</th>
+            <th className="w-6 text-center font-medium">L</th>
+            <th className="w-8 text-center font-medium">GD</th>
+            <th className="w-7 text-center font-medium">Pts</th>
+          </tr>
+        </thead>
+        <tbody>
+          {(g.table || []).map((r) => {
+            const pooled = !!liveTeamToId(r.code, r.name);
+            return (
+              <tr key={r.code || r.name} className="border-t border-stone-100">
+                <td
+                  className={
+                    "py-1 " +
+                    (pooled ? "font-bold text-emerald-900" : "text-stone-700")
+                  }
+                >
+                  <span className="font-mono text-[11px] text-stone-400 mr-1">
+                    {r.position}
+                  </span>
+                  {r.name}
+                </td>
+                <td className="text-center text-stone-600">{r.played}</td>
+                <td className="text-center text-stone-600">{r.won}</td>
+                <td className="text-center text-stone-600">{r.draw}</td>
+                <td className="text-center text-stone-600">{r.lost}</td>
+                <td className="text-center text-stone-600">
+                  {r.gd > 0 ? "+" + r.gd : r.gd}
+                </td>
+                <td className="text-center font-bold text-stone-800">
+                  {r.points}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function ResultsView({ live }) {
+  const matches = (live && live.matches) || [];
+  const standings = ((live && live.standings) || [])
+    .slice()
+    .sort((a, b) => (a.group || "").localeCompare(b.group || ""));
+
+  if (!live || (matches.length === 0 && standings.length === 0)) {
+    return (
+      <div className="bg-white border border-stone-200 rounded-xl p-6 text-center">
+        <div className="text-3xl mb-2">📡</div>
+        <div className="font-bold text-stone-800">No live data yet</div>
+        <p className="text-stone-600 text-sm mt-1">
+          Match scores and group standings show up here once the live sync runs.
+          If the tournament is underway and this stays empty, check the{" "}
+          <span className="font-mono">Sync live results</span> GitHub Action.
+        </p>
+      </div>
+    );
+  }
+
+  const isLive = (m) => m.status === "IN_PLAY" || m.status === "PAUSED";
+  const isDone = (m) => m.status === "FINISHED";
+  const isUpcoming = (m) => m.status === "SCHEDULED" || m.status === "TIMED";
+
+  const recent = matches
+    .filter((m) => isLive(m) || isDone(m))
+    .sort((a, b) => new Date(b.utcDate) - new Date(a.utcDate))
+    .slice(0, 20);
+  const upcoming = matches
+    .filter(isUpcoming)
+    .sort((a, b) => new Date(a.utcDate) - new Date(b.utcDate))
+    .slice(0, 12);
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-3">
+        <Eyebrow>Live results</Eyebrow>
+        <span className="text-xs text-stone-400">
+          {live.source ? live.source + " · " : ""}updated{" "}
+          {timeAgo(live.updatedAt)}
+        </span>
+      </div>
+
+      {recent.length > 0 && (
+        <div className="bg-white border border-stone-200 rounded-xl p-3 mb-4">
+          <div className="text-xs font-bold text-stone-400 uppercase tracking-wide mb-1">
+            Results &amp; live
+          </div>
+          {recent.map((m) => (
+            <MatchRow key={m.id} m={m} />
+          ))}
+        </div>
+      )}
+
+      {standings.length > 0 && (
+        <>
+          <div className="text-xs font-bold text-stone-400 uppercase tracking-wide mb-2">
+            Group standings
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-3">
+            {standings.map((g) => (
+              <GroupTable key={g.group} g={g} />
+            ))}
+          </div>
+        </>
+      )}
+
+      {upcoming.length > 0 && (
+        <div className="bg-white border border-stone-200 rounded-xl p-3 mt-1">
+          <div className="text-xs font-bold text-stone-400 uppercase tracking-wide mb-1">
+            Upcoming
+          </div>
+          {upcoming.map((m) => (
+            <MatchRow key={m.id} m={m} />
+          ))}
+        </div>
+      )}
+
+      <p className="text-xs text-stone-400 mt-3">
+        Your pool teams are highlighted. Scores and tables come straight from the
+        live feed; the commissioner still confirms how they translate into pool
+        points.
+      </p>
+    </div>
+  );
+}
+
 // ---------- Rules ----------
 
 function RulesView() {
@@ -865,7 +1239,7 @@ function RulesView() {
 
 // ---------- Commissioner ----------
 
-function AdminView({ results, setResults, settings, setSettings }) {
+function AdminView({ results, setResults, settings, setSettings, live }) {
   const [authed, setAuthed] = useState(false);
   const [code, setCode] = useState("");
   const [draft, setDraft] = useState(null);
@@ -953,6 +1327,14 @@ function AdminView({ results, setResults, settings, setSettings }) {
       ...d,
       [id]: { ...d[id], ko: { ...d[id].ko, [key]: !d[id].ko[key] } },
     }));
+  };
+
+  const syncFromApi = () => {
+    if (!live) return;
+    setDraft((d) => deriveResults(live, d));
+    setSaveMsg(
+      "Pulled the live feed into the form below — review every team, then Save results."
+    );
   };
 
   const saveResults = async () => {
@@ -1105,10 +1487,40 @@ function AdminView({ results, setResults, settings, setSettings }) {
         ))}
       </div>
 
+      <div className="bg-white border border-stone-200 rounded-xl p-4 mb-4">
+        <div className="flex items-center justify-between gap-2 flex-wrap">
+          <Eyebrow>Sync from live feed</Eyebrow>
+          {live && (
+            <span className="text-xs text-stone-400">
+              feed updated {timeAgo(live.updatedAt)}
+            </span>
+          )}
+        </div>
+        <p className="text-xs text-stone-500 mt-1">
+          Pulls group W/D, group finish (including the 8 best third-place
+          qualifiers), and knockout wins from the live feed into the form below.
+          Nothing saves until you review and hit <strong>Save results</strong>,
+          so you can fix anything the feed gets wrong.
+        </p>
+        <button
+          onClick={syncFromApi}
+          disabled={!live}
+          className={
+            "mt-2 px-4 py-2 rounded-lg text-sm font-bold " +
+            (live
+              ? "bg-emerald-800 text-white hover:bg-emerald-700"
+              : "bg-stone-100 text-stone-400")
+          }
+        >
+          {live ? "Sync from API" : "No live feed available yet"}
+        </button>
+      </div>
+
       <Eyebrow>Match results, by team</Eyebrow>
       <p className="text-xs text-stone-500 mt-1 mb-3">
         Update after each matchday: group wins and draws, then group finish,
-        then check off knockout wins as they happen. Hit Save when done.
+        then check off knockout wins as they happen. Hit Save when done. Use
+        Sync above to fill this in automatically, then adjust.
       </p>
 
       {TIERS.map((tier) => (
@@ -1121,7 +1533,8 @@ function AdminView({ results, setResults, settings, setSettings }) {
             const advanced =
               r.finish === "winner" ||
               r.finish === "runnerup" ||
-              r.finish === "third";
+              r.finish === "third" ||
+              (r.ko && Object.values(r.ko).some(Boolean));
             return (
               <div
                 key={tm.id}
@@ -1202,6 +1615,7 @@ export default function WorldCupTierPool() {
   const [tab, setTab] = useState("picks");
   const [results, setResults] = useState({});
   const [settings, setSettings] = useState({ lockState: "auto" });
+  const [live, setLive] = useState(null);
   const [loaded, setLoaded] = useState(false);
 
   const deadline = useMemo(() => new Date(DEADLINE_UTC), []);
@@ -1221,6 +1635,12 @@ export default function WorldCupTierPool() {
       } catch (e) {
         // default settings
       }
+      try {
+        const l = await storage.get("live", true);
+        if (l && l.value) setLive(JSON.parse(l.value));
+      } catch (e) {
+        // no live feed yet
+      }
       setLoaded(true);
     })();
   }, []);
@@ -1235,6 +1655,7 @@ export default function WorldCupTierPool() {
   const tabs = [
     ["picks", "Make Picks"],
     ["board", "Leaderboard"],
+    ["results", "Results"],
     ["rules", "Rules"],
     ["admin", "Commissioner"],
   ];
@@ -1299,6 +1720,8 @@ export default function WorldCupTierPool() {
             settings={settings}
             locked={locked}
           />
+        ) : tab === "results" ? (
+          <ResultsView live={live} />
         ) : tab === "rules" ? (
           <RulesView />
         ) : (
@@ -1307,6 +1730,7 @@ export default function WorldCupTierPool() {
             setResults={setResults}
             settings={settings}
             setSettings={setSettings}
+            live={live}
           />
         )}
       </main>

@@ -7,8 +7,11 @@ commissioner enters results and the leaderboard updates live.
 
 - **Make Picks** — draft your nine teams + Golden Boot + tiebreaker.
 - **Leaderboard** — live standings, expandable per-team breakdowns.
+- **Results** — live/finished match scores and the 12 group tables, pulled from
+  a live World Cup feed; your pool's teams are highlighted.
 - **Rules** — scoring table and tier listings.
-- **Commissioner** — passcode-gated: enter results, set the lock, manage entries.
+- **Commissioner** — passcode-gated: enter results (or **Sync from API** to
+  auto-fill them from the live feed), set the lock, manage entries.
 
 Built with React + Vite + Tailwind. Shared data lives in **Supabase**; the site
 is hosted as static files on **GitHub Pages**.
@@ -39,7 +42,9 @@ GitHub Actions workflow.
 | `src/storage.js` | Key/value layer over Supabase (mirrors the old API). |
 | `src/supabaseClient.js` | Supabase client + `isConfigured` flag. |
 | `supabase/schema.sql` | Table + Row-Level Security policies to run in Supabase. |
+| `scripts/sync-results.mjs` | Pulls live scores/standings from football-data.org into Supabase. |
 | `.github/workflows/deploy.yml` | Builds and deploys to GitHub Pages on push. |
+| `.github/workflows/sync-results.yml` | Runs the live-results sync every ~5 min. |
 | `.env.example` | Template for local env vars. |
 
 The original standalone component is preserved at `world-cup-tier-pool.jsx`

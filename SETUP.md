@@ -97,6 +97,48 @@ yourself / whoever runs the pool.
 
 ---
 
+## 5. Live results (optional but recommended)
+
+The **Results** tab and the Commissioner's **Sync from API** button are powered
+by a small scheduled job that pulls World Cup scores and group standings from
+[football-data.org](https://www.football-data.org/) and writes them into the
+same Supabase table the site reads. The site never calls the football API
+directly — that would expose the token and hit CORS — so this runs server-side
+in GitHub Actions.
+
+1. Get a **free API token**: register at
+   <https://www.football-data.org/client/register>. They email you a token.
+2. In your repo: **Settings → Secrets and variables → Actions → New repository
+   secret**. Add one secret:
+
+   | Name | Value |
+   | --- | --- |
+   | `FOOTBALL_DATA_TOKEN` | the token from football-data.org |
+
+   (The sync job reuses your existing `VITE_SUPABASE_URL` and
+   `VITE_SUPABASE_ANON_KEY` secrets — no need to re-add those.)
+3. The workflow [`.github/workflows/sync-results.yml`](.github/workflows/sync-results.yml)
+   runs every ~5 minutes and writes a `live` row into the `kv` table. To kick it
+   off immediately, go to the **Actions** tab → **Sync live results** → **Run
+   workflow**. Then open the site's **Results** tab — scores and standings
+   should appear with an "updated Xm ago" stamp.
+
+> Notes: GitHub's scheduled runs use the **default branch** and have a 5-minute
+> minimum (and can be delayed a few minutes under load) — fine for a friendly
+> pool. GitHub also pauses scheduled workflows after 60 days with no repo
+> activity; a push or a manual run re-arms them. If you'd rather not bother with
+> live data at all, just skip this section — the Commissioner tab still works
+> fully by hand.
+
+### Swapping the data provider
+
+All provider-specific code lives in
+[`scripts/sync-results.mjs`](scripts/sync-results.mjs) (the `fetchFromFootballData`
+function). It normalizes into a small `{ matches, standings }` shape the site
+understands, so you can point it at a different API (e.g.
+[balldontlie FIFA](https://fifa.balldontlie.io/)) by rewriting just that one
+function if football-data.org's coverage disappoints mid-tournament.
+
 ## Day-to-day use
 
 - **Players** open the site, go to **Make Picks**, draft their nine teams +
@@ -104,9 +146,15 @@ yourself / whoever runs the pool.
   replaces their picks (until lock).
 - **Lock**: entries auto-lock at the opening kickoff (June 11, 2026, 3:00 PM
   ET). The commissioner can also force lock/open early in the Commissioner tab.
-- **Commissioner**: after each matchday, open the Commissioner tab, update each
-  team's group wins/draws, set how they finished the group, check off knockout
-  wins, and hit **Save results**. Set the **Golden Boot winner** at the end.
+- **Results**: a read-only tab showing live/finished match scores, upcoming
+  fixtures, and the 12 group tables, pulled from the live feed (section 5). Your
+  pool's teams are highlighted. Visible to everyone, no passcode.
+- **Commissioner**: after each matchday, open the Commissioner tab. If the live
+  feed is set up (section 5), hit **Sync from API** to auto-fill every team's
+  group wins/draws, group finish (including the 8 best third-place qualifiers),
+  and knockout wins — then **review and adjust** anything before hitting **Save
+  results**. Without the feed, enter it all by hand as before. Set the **Golden
+  Boot winner** at the end.
 
 ## Changing teams, tiers, odds, or scoring
 

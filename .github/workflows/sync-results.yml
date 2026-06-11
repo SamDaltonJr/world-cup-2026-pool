@@ -1,0 +1,39 @@
+name: Sync live results
+
+# Pulls World Cup matches + standings from football-data.org and writes them
+# into Supabase (the `live` row) so the site can show live results and the
+# commissioner can pre-fill scoring. See scripts/sync-results.mjs.
+
+on:
+  # GitHub's minimum cron granularity is 5 minutes. Scheduled runs can be
+  # delayed a few minutes under load, which is fine for a friends pool.
+  schedule:
+    - cron: "*/5 * * * *"
+  # Lets you run it on demand from the Actions tab.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# If a run is still going when the next tick fires, skip rather than stack.
+concurrency:
+  group: sync-results
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Fetch live results and store in Supabase
+        env:
+          FOOTBALL_DATA_TOKEN: ${{ secrets.FOOTBALL_DATA_TOKEN }}
+          # Reuses the same Supabase secrets the deploy workflow already uses.
+          SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+        run: node scripts/sync-results.mjs
