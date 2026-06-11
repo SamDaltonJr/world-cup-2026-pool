@@ -33,6 +33,9 @@ jobs:
       - name: Fetch live results and store in Supabase
         env:
           FOOTBALL_DATA_TOKEN: ${{ secrets.FOOTBALL_DATA_TOKEN }}
+          # Optional: free api-football key for live in-play scores. Without it
+          # the sync still runs (final scores + standings), just no live overlay.
+          APISPORTS_KEY: ${{ secrets.APISPORTS_KEY }}
           # Reuses the same Supabase secrets the deploy workflow already uses.
           SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
           SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}

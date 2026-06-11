@@ -362,7 +362,9 @@ function deriveResults(live, prev) {
   // --- Knockout wins from finished matches ---
   (live.matches || []).forEach((mt) => {
     const ko = STAGE_TO_KO[mt.stage];
-    if (!ko || mt.status !== "FINISHED") return;
+    // Only count official finals — skip provisional (carried-forward) live
+    // scores so a knockout win isn't credited off an unconfirmed result.
+    if (!ko || mt.status !== "FINISHED" || mt._provisional) return;
     let side = mt.winner; // HOME | AWAY | DRAW | null
     if (side !== "HOME" && side !== "AWAY") {
       if (mt.homeScore != null && mt.awayScore != null) {
@@ -1033,8 +1035,9 @@ function MatchRow({ m }) {
     hour: "numeric",
     minute: "2-digit",
   });
+  const liveLabel = "LIVE" + (m.minute ? " " + m.minute + "'" : "");
   const meta =
-    (live ? "LIVE" : done ? "FT" : when) +
+    (live ? liveLabel : done ? "FT" : when) +
     (m.group ? " · " + m.group.replace("GROUP_", "Group ") : "");
   return (
     <div className="py-2 border-b border-stone-100 last:border-0">
@@ -1665,7 +1668,7 @@ function AdminView({ results, setResults, settings, setSettings, live }) {
 // ---------- App shell ----------
 
 export default function WorldCupTierPool() {
-  const [tab, setTab] = useState("picks");
+  const [tab, setTab] = useState(null);
   const [results, setResults] = useState({});
   const [settings, setSettings] = useState({ lockState: "auto" });
   const [live, setLive] = useState(null);
@@ -1698,6 +1701,21 @@ export default function WorldCupTierPool() {
     })();
   }, []);
 
+  // Poll the live feed so an open page picks up new scores without a reload.
+  // The poller refreshes Supabase every ~5 min; checking once a minute keeps the
+  // Results tab current with negligible load.
+  useEffect(() => {
+    const t = setInterval(async () => {
+      try {
+        const l = await storage.get("live", true);
+        if (l && l.value) setLive(JSON.parse(l.value));
+      } catch (e) {
+        // transient; try again next tick
+      }
+    }, 60000);
+    return () => clearInterval(t);
+  }, []);
+
   const locked =
     settings.lockState === "locked"
       ? true
@@ -1705,13 +1723,27 @@ export default function WorldCupTierPool() {
       ? false
       : Date.now() >= deadline.getTime();
 
-  const tabs = [
-    ["picks", "Make Picks"],
-    ["board", "Leaderboard"],
-    ["results", "Results"],
-    ["rules", "Rules"],
-    ["admin", "Commissioner"],
-  ];
+  // Once entries lock, the pool is about following along, so lead with Results
+  // and tuck the now-inactive Make Picks tab at the end, grayed. Before lock,
+  // Make Picks stays front-and-center. The third item flags a "muted" tab.
+  const tabs = locked
+    ? [
+        ["results", "Results"],
+        ["board", "Leaderboard"],
+        ["rules", "Rules"],
+        ["admin", "Commissioner"],
+        ["picks", "Make Picks", true],
+      ]
+    : [
+        ["picks", "Make Picks"],
+        ["board", "Leaderboard"],
+        ["results", "Results"],
+        ["rules", "Rules"],
+        ["admin", "Commissioner"],
+      ];
+
+  // Default to Results after lock, Make Picks before, until the user picks a tab.
+  const activeTab = tab || (locked ? "results" : "picks");
 
   return (
     <div className="min-h-screen bg-stone-100">
@@ -1734,15 +1766,17 @@ export default function WorldCupTierPool() {
               : "Entries lock at kickoff"}
           </div>
         </div>
-        <div className="max-w-3xl mx-auto px-4 flex gap-1">
-          {tabs.map(([id, label]) => (
+        <div className="max-w-3xl mx-auto px-4 flex gap-1 overflow-x-auto flex-nowrap [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden">
+          {tabs.map(([id, label, muted]) => (
             <button
               key={id}
               onClick={() => setTab(id)}
               className={
-                "px-3 py-2 text-sm font-semibold rounded-t-lg " +
-                (tab === id
+                "px-3 py-2 text-sm font-semibold rounded-t-lg shrink-0 whitespace-nowrap " +
+                (activeTab === id
                   ? "bg-stone-100 text-emerald-900"
+                  : muted
+                  ? "text-emerald-200/40 hover:text-emerald-200/70"
                   : "text-emerald-200 hover:text-white")
               }
             >
@@ -1765,17 +1799,17 @@ export default function WorldCupTierPool() {
           <div className="text-center text-stone-500 py-10 text-sm">
             Warming up…
           </div>
-        ) : tab === "picks" ? (
+        ) : activeTab === "picks" ? (
           <PicksView locked={locked} onViewBoard={() => setTab("board")} />
-        ) : tab === "board" ? (
+        ) : activeTab === "board" ? (
           <LeaderboardView
             results={results}
             settings={settings}
             locked={locked}
           />
-        ) : tab === "results" ? (
+        ) : activeTab === "results" ? (
           <ResultsView live={live} />
-        ) : tab === "rules" ? (
+        ) : activeTab === "rules" ? (
           <RulesView />
         ) : (
           <AdminView

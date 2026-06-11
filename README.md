@@ -42,7 +42,7 @@ GitHub Actions workflow.
 | `src/storage.js` | Key/value layer over Supabase (mirrors the old API). |
 | `src/supabaseClient.js` | Supabase client + `isConfigured` flag. |
 | `supabase/schema.sql` | Table + Row-Level Security policies to run in Supabase. |
-| `scripts/sync-results.mjs` | Pulls live scores/standings from football-data.org into Supabase. |
+| `scripts/sync-results.mjs` | Pulls schedule/standings/finals (football-data.org) + live in-play scores (api-football) into Supabase. |
 | `.github/workflows/deploy.yml` | Builds and deploys to GitHub Pages on push. |
 | `.github/workflows/sync-results.yml` | Runs the live-results sync every ~5 min. |
 | `.env.example` | Template for local env vars. |

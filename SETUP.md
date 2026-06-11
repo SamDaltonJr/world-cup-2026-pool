@@ -130,14 +130,40 @@ in GitHub Actions.
 > live data at all, just skip this section — the Commissioner tab still works
 > fully by hand.
 
+### Live in-play scores (optional add-on)
+
+football-data.org's **free** tier does **not** update scores during a match —
+it only posts the result afterward. To show live in-play scores (e.g. "1–0,
+39'") while games are being played, the sync can *also* pull from
+[api-football](https://www.api-football.com/) (API-Sports), whose free tier
+allows live scores (it can't serve the 2026 schedule or standings on free, so
+football-data stays the base for those — the two are combined automatically).
+
+1. Get a **free key**: register at
+   <https://dashboard.api-football.com/register>; the key is on your dashboard.
+2. Add it as another repository secret:
+
+   | Name | Value |
+   | --- | --- |
+   | `APISPORTS_KEY` | the key from api-football / API-Sports |
+
+That's it — the next sync overlays live scores onto the Results tab, and an open
+page auto-refreshes every minute. Leave the secret unset and everything still
+works, just without the live overlay.
+
+> How it stays within the free **100 requests/day** cap: the live call only
+> fires when a match is in its kickoff window and only every ~10 minutes, so
+> live scores are fresh to within roughly 10 minutes (not a second-by-second
+> ticker). A finished match keeps its last live score until football-data posts
+> the official final.
+
 ### Swapping the data provider
 
-All provider-specific code lives in
-[`scripts/sync-results.mjs`](scripts/sync-results.mjs) (the `fetchFromFootballData`
-function). It normalizes into a small `{ matches, standings }` shape the site
-understands, so you can point it at a different API (e.g.
-[balldontlie FIFA](https://fifa.balldontlie.io/)) by rewriting just that one
-function if football-data.org's coverage disappoints mid-tournament.
+Provider code lives in [`scripts/sync-results.mjs`](scripts/sync-results.mjs):
+`fetchFromFootballData` (base: schedule, standings, finals) and `fetchLiveScores`
+(api-football live overlay). Both normalize into the small `{ matches, standings }`
+shape the site understands, so you can repoint either at a different API if one
+disappoints mid-tournament.
 
 ## Day-to-day use
 
