@@ -152,10 +152,11 @@ page auto-refreshes every minute. Leave the secret unset and everything still
 works, just without the live overlay.
 
 > How it stays within the free **100 requests/day** cap: the live call only
-> fires when a match is in its kickoff window and only every ~10 minutes, so
-> live scores are fresh to within roughly 10 minutes (not a second-by-second
-> ticker). A finished match keeps its last live score until football-data posts
-> the official final.
+> fires when a match is in its kickoff window (zero calls off match-hours) and
+> only every ~15 minutes, so live scores are fresh to within roughly 15 minutes
+> (not a second-by-second ticker). The tournament's busiest day — five
+> spread-out matches — costs about 55 calls. A finished match keeps its last
+> live score until football-data posts the official final.
 
 ### Swapping the data provider
 

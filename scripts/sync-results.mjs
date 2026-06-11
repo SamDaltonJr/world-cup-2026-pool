@@ -304,9 +304,10 @@ async function main() {
   const prev = await getPrevPayload();
 
   // Only spend an api-football call when a match is plausibly in progress, and
-  // no more than once per ~10 minutes, to stay under the free 100/day cap. The
-  // throttle is based on the last fetch timestamp (not the clock minute) so a
-  // jittery GitHub cron run doesn't skip the window.
+  // no more than once per ~15 minutes, to stay comfortably under the free
+  // 100/day cap. (Busiest day of the tournament is 5 spread-out matches ≈ 55
+  // calls at this cadence.) The throttle is based on the last fetch timestamp
+  // (not the clock minute) so a jittery GitHub cron run doesn't skip the window.
   const now = Date.now();
   const inWindow = fdMatches.some((m) => {
     const ko = new Date(m.utcDate).getTime();
@@ -315,7 +316,7 @@ async function main() {
   const lastFetch = prev && prev.liveFetchedAt
     ? new Date(prev.liveFetchedAt).getTime()
     : 0;
-  const throttleOk = now - lastFetch >= 9 * 60000;
+  const throttleOk = now - lastFetch >= 14 * 60000;
 
   let liveList = [];
   let fetchedLive = false;
