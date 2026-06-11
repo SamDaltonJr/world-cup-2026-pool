@@ -424,6 +424,38 @@ function Eyebrow({ children }) {
   );
 }
 
+// Pool team id (FIFA three-letter code) -> ISO 3166-1 alpha-2 for flag images.
+// England and Scotland use flagcdn's UK-subdivision codes so they get their own
+// flags rather than the Union Jack.
+const FIFA_TO_ISO = {
+  ESP: "es", FRA: "fr", ENG: "gb-eng", POR: "pt", BRA: "br", ARG: "ar",
+  GER: "de", NED: "nl", BEL: "be", NOR: "no", COL: "co", MAR: "ma",
+  JPN: "jp", USA: "us", MEX: "mx", URU: "uy", CRO: "hr", SUI: "ch",
+  TUR: "tr", ECU: "ec", AUT: "at", CIV: "ci", SEN: "sn", SWE: "se",
+  PAR: "py", SCO: "gb-sct", ALG: "dz", CAN: "ca", EGY: "eg", GHA: "gh",
+  BIH: "ba", KOR: "kr", CZE: "cz", IRN: "ir", TUN: "tn", AUS: "au",
+  COD: "cd", CPV: "cv", UZB: "uz", HAI: "ht", PAN: "pa", CUW: "cw",
+  KSA: "sa", QAT: "qa", NZL: "nz", IRQ: "iq", JOR: "jo", RSA: "za",
+};
+
+// A small country flag for a pool team id. Renders nothing for ids we don't
+// have a flag for, so it degrades cleanly. Flags are 4:3 (e.g. 20x15).
+function Flag({ id, className = "" }) {
+  const iso = FIFA_TO_ISO[id];
+  if (!iso) return null;
+  return (
+    <img
+      src={`https://flagcdn.com/w40/${iso}.png`}
+      srcSet={`https://flagcdn.com/w80/${iso}.png 2x`}
+      width={20}
+      height={15}
+      alt=""
+      loading="lazy"
+      className={"inline-block rounded-[2px] object-cover shrink-0 " + className}
+    />
+  );
+}
+
 function TeamChip({ team, selected, disabled, onClick }) {
   return (
     <button
@@ -438,6 +470,7 @@ function TeamChip({ team, selected, disabled, onClick }) {
           : "bg-white border-stone-300 text-stone-800 hover:border-emerald-600")
       }
     >
+      <Flag id={team.id} className="mr-2" />
       <span className="font-semibold text-sm">{team.name}</span>
     </button>
   );
@@ -575,8 +608,16 @@ function PicksView({ locked, onViewBoard }) {
                   <span className="text-xs font-bold text-stone-400 uppercase tracking-wide whitespace-nowrap pt-0.5">
                     Tier {t.n}
                   </span>
-                  <span className="text-sm font-semibold text-stone-800 text-right">
-                    {ids.map((id) => (ALL_TEAMS[id] ? ALL_TEAMS[id].name : id)).join(", ")}
+                  <span className="flex flex-wrap gap-x-3 gap-y-1 justify-end text-sm font-semibold text-stone-800">
+                    {ids.map((id) => (
+                      <span
+                        key={id}
+                        className="inline-flex items-center gap-1.5 whitespace-nowrap"
+                      >
+                        <Flag id={id} />
+                        {ALL_TEAMS[id] ? ALL_TEAMS[id].name : id}
+                      </span>
+                    ))}
                   </span>
                 </div>
               );
@@ -944,6 +985,7 @@ function LeaderboardView({ results, settings, locked }) {
                         <span className="font-mono text-xs text-stone-400 mr-2">
                           T{tm ? tm.tier : "?"}
                         </span>
+                        <Flag id={id} className="mr-1.5 align-[-2px]" />
                         {tm ? tm.name : id}
                       </span>
                       <span className="font-mono text-sm text-stone-600">
@@ -980,8 +1022,10 @@ function LeaderboardView({ results, settings, locked }) {
 function MatchRow({ m }) {
   const live = m.status === "IN_PLAY" || m.status === "PAUSED";
   const done = m.status === "FINISHED";
-  const hp = !!liveTeamToId(m.home && m.home.code, m.home && m.home.name);
-  const ap = !!liveTeamToId(m.away && m.away.code, m.away && m.away.name);
+  const hId = liveTeamToId(m.home && m.home.code, m.home && m.home.name);
+  const aId = liveTeamToId(m.away && m.away.code, m.away && m.away.name);
+  const hp = !!hId;
+  const ap = !!aId;
   const hasScore = (live || done) && m.homeScore != null && m.awayScore != null;
   const when = new Date(m.utcDate).toLocaleString(undefined, {
     month: "short",
@@ -997,11 +1041,14 @@ function MatchRow({ m }) {
       <div className="flex items-center gap-2">
         <span
           className={
-            "flex-1 text-right text-sm " +
+            "flex-1 text-sm " +
             (hp ? "font-bold text-emerald-900" : "text-stone-700")
           }
         >
-          {(m.home && m.home.name) || "TBD"}
+          <span className="flex items-center justify-end gap-1.5">
+            {(m.home && m.home.name) || "TBD"}
+            <Flag id={hId} />
+          </span>
         </span>
         <span
           className={
@@ -1021,7 +1068,10 @@ function MatchRow({ m }) {
             (ap ? "font-bold text-emerald-900" : "text-stone-700")
           }
         >
-          {(m.away && m.away.name) || "TBD"}
+          <span className="flex items-center gap-1.5">
+            <Flag id={aId} />
+            {(m.away && m.away.name) || "TBD"}
+          </span>
         </span>
       </div>
       <div className="text-center text-[11px] text-stone-400 mt-0.5">{meta}</div>
@@ -1049,7 +1099,8 @@ function GroupTable({ g }) {
         </thead>
         <tbody>
           {(g.table || []).map((r) => {
-            const pooled = !!liveTeamToId(r.code, r.name);
+            const id = liveTeamToId(r.code, r.name);
+            const pooled = !!id;
             return (
               <tr key={r.code || r.name} className="border-t border-stone-100">
                 <td
@@ -1061,6 +1112,7 @@ function GroupTable({ g }) {
                   <span className="font-mono text-[11px] text-stone-400 mr-1">
                     {r.position}
                   </span>
+                  <Flag id={id} className="mr-1.5 align-[-2px]" />
                   {r.name}
                 </td>
                 <td className="text-center text-stone-600">{r.played}</td>
@@ -1541,7 +1593,8 @@ function AdminView({ results, setResults, settings, setSettings, live }) {
                 className="bg-white border border-stone-200 rounded-xl p-3 mb-2"
               >
                 <div className="flex items-center justify-between flex-wrap gap-2">
-                  <span className="font-semibold text-sm text-stone-800 w-32">
+                  <span className="font-semibold text-sm text-stone-800 w-36 flex items-center gap-1.5">
+                    <Flag id={tm.id} />
                     {tm.name}
                   </span>
                   <div className="flex items-center gap-3">
