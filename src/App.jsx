@@ -249,7 +249,7 @@ function TeamChip({ team, selected, disabled, onClick }) {
       onClick={onClick}
       disabled={disabled}
       className={
-        "flex items-center justify-between w-full px-3 py-2 rounded-lg border text-left transition-colors " +
+        "flex items-center w-full px-3 py-2 rounded-lg border text-left transition-colors " +
         (selected
           ? "bg-emerald-800 border-emerald-800 text-white"
           : disabled
@@ -258,14 +258,6 @@ function TeamChip({ team, selected, disabled, onClick }) {
       }
     >
       <span className="font-semibold text-sm">{team.name}</span>
-      <span
-        className={
-          "text-xs font-mono " +
-          (selected ? "text-emerald-200" : "text-stone-500")
-        }
-      >
-        {team.odds}
-      </span>
     </button>
   );
 }
@@ -461,8 +453,9 @@ function PicksView({ locked, onViewBoard }) {
           className="w-full border border-stone-300 rounded-lg px-3 py-2 text-stone-800 focus:outline-none focus:border-emerald-600"
         />
         <p className="text-xs text-stone-500 mt-2">
-          Entries are visible to everyone in the pool. Resubmitting under the
-          same name replaces your earlier picks.
+          Your name shows on the entry list, but your picks stay hidden from
+          everyone until the opening kickoff. Resubmitting under the same name
+          replaces your earlier picks.
         </p>
       </div>
 
@@ -597,7 +590,7 @@ function PicksView({ locked, onViewBoard }) {
 
 // ---------- Leaderboard ----------
 
-function LeaderboardView({ results, settings }) {
+function LeaderboardView({ results, settings, locked }) {
   const [entries, setEntries] = useState(null);
   const [expanded, setExpanded] = useState(null);
   const [loadError, setLoadError] = useState("");
@@ -654,6 +647,51 @@ function LeaderboardView({ results, settings }) {
         Loading entries…
       </div>
     );
+
+  // Before the deadline, keep everyone's actual picks hidden — only show who
+  // has entered. Full lineups + standings unlock once entries lock.
+  if (!locked) {
+    const names = entries
+      .map((e) => e.name)
+      .sort((a, b) => a.localeCompare(b));
+    return (
+      <div>
+        <div className="flex items-center justify-between mb-3">
+          <Eyebrow>Entered ({names.length})</Eyebrow>
+          <button
+            onClick={loadEntries}
+            className="text-xs font-semibold text-emerald-700 hover:text-emerald-900"
+          >
+            Refresh
+          </button>
+        </div>
+        <div className="bg-emerald-50 border border-emerald-200 text-emerald-800 text-sm rounded-lg px-4 py-3 mb-3">
+          🔒 Everyone&apos;s picks stay hidden until the opening kickoff. The
+          full lineups and live standings unlock the moment entries lock.
+        </div>
+        {loadError && (
+          <div className="bg-amber-50 border border-amber-200 text-amber-800 text-sm rounded-lg px-4 py-3 mb-3">
+            {loadError}
+          </div>
+        )}
+        {names.length === 0 && !loadError && (
+          <div className="bg-white border border-stone-200 rounded-xl p-6 text-center text-stone-500 text-sm">
+            No entries yet. Be the first on the pitch.
+          </div>
+        )}
+        {names.map((nm, i) => (
+          <div
+            key={nm + i}
+            className="bg-white border border-stone-200 rounded-xl mb-2 px-4 py-3 flex items-center gap-3"
+          >
+            <span className="text-emerald-600">✓</span>
+            <span className="font-semibold text-stone-800">{nm}</span>
+            <span className="ml-auto text-xs text-stone-400">locked in</span>
+          </div>
+        ))}
+      </div>
+    );
+  }
 
   return (
     <div>
@@ -1252,7 +1290,11 @@ export default function WorldCupTierPool() {
         ) : tab === "picks" ? (
           <PicksView locked={locked} onViewBoard={() => setTab("board")} />
         ) : tab === "board" ? (
-          <LeaderboardView results={results} settings={settings} />
+          <LeaderboardView
+            results={results}
+            settings={settings}
+            locked={locked}
+          />
         ) : tab === "rules" ? (
           <RulesView />
         ) : (
