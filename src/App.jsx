@@ -223,14 +223,15 @@ function slugify(name) {
 function useCountdown(deadline) {
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
-    const t = setInterval(() => setNow(Date.now()), 30000);
+    const t = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(t);
   }, []);
   const ms = deadline.getTime() - now;
   if (ms <= 0) return null;
   const h = Math.floor(ms / 3600000);
   const m = Math.floor((ms % 3600000) / 60000);
-  return { h, m };
+  const s = Math.floor((ms % 60000) / 1000);
+  return { h, m, s };
 }
 
 // ---------- Shared UI bits ----------
@@ -1252,7 +1253,10 @@ export default function WorldCupTierPool() {
             {locked
               ? "Entries locked · tournament underway"
               : countdown
-              ? `Entries lock in ${countdown.h}h ${countdown.m}m (kickoff, 3:00 PM ET)`
+              ? `Entries lock in ${countdown.h}h ${String(countdown.m).padStart(
+                  2,
+                  "0"
+                )}m ${String(countdown.s).padStart(2, "0")}s (kickoff, 3:00 PM ET)`
               : "Entries lock at kickoff"}
           </div>
         </div>
