@@ -1019,6 +1019,180 @@ function LeaderboardView({ results, settings, locked }) {
   );
 }
 
+// ---------- Analysis (pick distribution) ----------
+
+function AnalysisView({ locked }) {
+  const [entries, setEntries] = useState(null);
+  const [loadError, setLoadError] = useState("");
+
+  const loadEntries = async () => {
+    setLoadError("");
+    try {
+      const listed = await storage.list("entry:", true);
+      const keys = (listed && listed.keys) || [];
+      const loaded = [];
+      await Promise.all(
+        keys.map(async (k) => {
+          try {
+            const res = await storage.get(k, true);
+            if (res && res.value) loaded.push(JSON.parse(res.value));
+          } catch (e) {
+            // skip unreadable entry
+          }
+        })
+      );
+      setEntries(loaded);
+    } catch (e) {
+      setEntries([]);
+      setLoadError("Could not load entries yet. Try again in a moment.");
+    }
+  };
+
+  useEffect(() => {
+    loadEntries();
+  }, []);
+
+  const total = entries ? entries.length : 0;
+
+  // tierCounts[tierN][teamId] = how many entries picked that team.
+  const tierCounts = useMemo(() => {
+    const out = {};
+    TIERS.forEach((t) => {
+      out[t.n] = {};
+      t.teams.forEach((tm) => (out[t.n][tm.id] = 0));
+    });
+    (entries || []).forEach((e) => {
+      TIERS.forEach((t) => {
+        const v = e.picks ? e.picks[t.n] : null;
+        const ids = Array.isArray(v) ? v : v ? [v] : [];
+        ids.forEach((id) => {
+          if (out[t.n][id] != null) out[t.n][id] += 1;
+        });
+      });
+    });
+    return out;
+  }, [entries]);
+
+  // Golden Boot popularity (free-text, so just group by the trimmed string).
+  const bootCounts = useMemo(() => {
+    const map = {};
+    (entries || []).forEach((e) => {
+      const b = (e.goldenBoot || "").trim();
+      if (b) map[b] = (map[b] || 0) + 1;
+    });
+    return Object.entries(map).sort(
+      (a, b) => b[1] - a[1] || a[0].localeCompare(b[0])
+    );
+  }, [entries]);
+
+  if (entries === null)
+    return (
+      <div className="text-center text-stone-500 py-10 text-sm">
+        Loading entries…
+      </div>
+    );
+
+  // Picks stay secret until the opening kickoff, same as the leaderboard.
+  if (!locked)
+    return (
+      <div className="bg-emerald-50 border border-emerald-200 text-emerald-800 text-sm rounded-lg px-4 py-3">
+        🔒 Pick analysis unlocks at the opening kickoff, once everyone&apos;s
+        picks become visible.
+      </div>
+    );
+
+  if (total === 0)
+    return (
+      <div className="bg-white border border-stone-200 rounded-xl p-6 text-center text-stone-500 text-sm">
+        No entries to analyze yet.
+      </div>
+    );
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-3">
+        <Eyebrow>Pick distribution · {total} entries</Eyebrow>
+        <button
+          onClick={loadEntries}
+          className="text-xs font-semibold text-emerald-700 hover:text-emerald-900"
+        >
+          Refresh
+        </button>
+      </div>
+      {loadError && (
+        <div className="bg-amber-50 border border-amber-200 text-amber-800 text-sm rounded-lg px-4 py-3 mb-3">
+          {loadError}
+        </div>
+      )}
+
+      {TIERS.map((tier) => {
+        const rows = tier.teams
+          .map((tm) => ({ tm, count: tierCounts[tier.n][tm.id] || 0 }))
+          .sort((a, b) => b.count - a.count || a.tm.name.localeCompare(b.tm.name));
+        return (
+          <div
+            key={tier.n}
+            className="bg-white border border-stone-200 rounded-xl p-4 mb-4"
+          >
+            <div className="flex items-baseline justify-between mb-2">
+              <Eyebrow>
+                Tier {tier.n} · pick {tier.pickCount}
+              </Eyebrow>
+              <span className="text-xs text-stone-400">
+                {tier.teams.length} teams
+              </span>
+            </div>
+            {rows.map(({ tm, count }) => {
+              const pct = total ? Math.round((count / total) * 100) : 0;
+              return (
+                <div key={tm.id} className="py-1.5">
+                  <div className="flex items-center justify-between gap-2 mb-1">
+                    <span className="flex items-center gap-1.5 text-sm text-stone-700 min-w-0">
+                      <Flag id={tm.id} />
+                      <span className="truncate">{tm.name}</span>
+                    </span>
+                    <span className="text-xs font-mono text-stone-500 shrink-0">
+                      {count} · {pct}%
+                    </span>
+                  </div>
+                  <div className="h-2 rounded bg-stone-100 overflow-hidden">
+                    <div
+                      className={
+                        "h-full rounded " +
+                        (count > 0 ? "bg-emerald-600" : "bg-stone-200")
+                      }
+                      style={{ width: pct + "%" }}
+                    />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        );
+      })}
+
+      {bootCounts.length > 0 && (
+        <div className="bg-white border border-stone-200 rounded-xl p-4">
+          <Eyebrow>Golden Boot picks</Eyebrow>
+          <div className="mt-2">
+            {bootCounts.map(([name, count]) => (
+              <div
+                key={name}
+                className="flex items-center justify-between py-1 border-b border-stone-100 last:border-0"
+              >
+                <span className="text-sm text-stone-700">{name}</span>
+                <span className="text-xs font-mono text-stone-500">
+                  {count} · {total ? Math.round((count / total) * 100) : 0}%
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ---------- Results (live feed) ----------
 
 function MatchRow({ m }) {
@@ -1730,6 +1904,7 @@ export default function WorldCupTierPool() {
     ? [
         ["results", "Results"],
         ["board", "Leaderboard"],
+        ["analysis", "Analysis"],
         ["rules", "Rules"],
         ["admin", "Commissioner"],
         ["picks", "Make Picks", true],
@@ -1737,6 +1912,7 @@ export default function WorldCupTierPool() {
     : [
         ["picks", "Make Picks"],
         ["board", "Leaderboard"],
+        ["analysis", "Analysis"],
         ["results", "Results"],
         ["rules", "Rules"],
         ["admin", "Commissioner"],
@@ -1809,6 +1985,8 @@ export default function WorldCupTierPool() {
           />
         ) : activeTab === "results" ? (
           <ResultsView live={live} />
+        ) : activeTab === "analysis" ? (
+          <AnalysisView locked={locked} />
         ) : activeTab === "rules" ? (
           <RulesView />
         ) : (
