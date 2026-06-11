@@ -92,7 +92,7 @@ const TIERS = [
   },
   {
     n: 4,
-    pickCount: 1,
+    pickCount: 2,
     teams: [
       { id: "NOR", name: "Norway", odds: "+3000" },
       { id: "COL", name: "Colombia", odds: "+4000" },
@@ -105,13 +105,14 @@ const TIERS = [
   },
   {
     n: 5,
-    pickCount: 1,
+    pickCount: 2,
     teams: [
       { id: "CRO", name: "Croatia", odds: "+7000" },
       { id: "SUI", name: "Switzerland", odds: "+7000" },
       { id: "TUR", name: "Türkiye", odds: "+7500" },
       { id: "ECU", name: "Ecuador", odds: "+8000" },
       { id: "AUT", name: "Austria", odds: "+10000" },
+      { id: "CIV", name: "Ivory Coast", odds: "+15000" },
     ],
   },
   {
@@ -120,8 +121,6 @@ const TIERS = [
     teams: [
       { id: "SEN", name: "Senegal", odds: "+12500" },
       { id: "SWE", name: "Sweden", odds: "+15000" },
-      { id: "CIV", name: "Ivory Coast", odds: "+15000" },
-      { id: "CAN", name: "Canada", odds: "+20000" },
       { id: "PAR", name: "Paraguay", odds: "+20000" },
       { id: "SCO", name: "Scotland", odds: "+22500" },
       { id: "ALG", name: "Algeria", odds: "+25000" },
@@ -129,8 +128,9 @@ const TIERS = [
   },
   {
     n: 7,
-    pickCount: 1,
+    pickCount: 2,
     teams: [
+      { id: "CAN", name: "Canada", odds: "+20000" },
       { id: "EGY", name: "Egypt", odds: "+30000" },
       { id: "GHA", name: "Ghana", odds: "+40000" },
       { id: "BIH", name: "Bosnia & Herz.", odds: "+40000" },
@@ -200,9 +200,14 @@ function teamPoints(r) {
 }
 
 function entryTeamIds(entry) {
+  // Picks are stored per tier. New entries use arrays for every tier; older
+  // entries may have a bare string for single-pick tiers — handle both.
   const ids = [];
-  for (let i = 1; i <= 7; i++) if (entry.picks[i]) ids.push(entry.picks[i]);
-  (entry.picks[8] || []).forEach((id) => ids.push(id));
+  TIERS.forEach((t) => {
+    const v = entry.picks ? entry.picks[t.n] : null;
+    if (Array.isArray(v)) v.forEach((id) => id && ids.push(id));
+    else if (v) ids.push(v);
+  });
   return ids;
 }
 
@@ -267,42 +272,52 @@ function TeamChip({ team, selected, disabled, onClick }) {
 
 // ---------- Picks view ----------
 
-function PicksView({ locked, onSaved }) {
+function PicksView({ locked, onViewBoard }) {
   const [name, setName] = useState("");
-  const [picks, setPicks] = useState({ 8: [] });
+  const [picks, setPicks] = useState({});
   const [tiebreaker, setTiebreaker] = useState("");
   const [goldenBoot, setGoldenBoot] = useState("");
   const [saving, setSaving] = useState(false);
-  const [savedMsg, setSavedMsg] = useState("");
+  const [submitted, setSubmitted] = useState(null);
   const [error, setError] = useState("");
 
+  const totalPicks = useMemo(
+    () => TIERS.reduce((s, t) => s + t.pickCount, 0),
+    []
+  );
+
   const pickTeam = (tierN, teamId) => {
-    setSavedMsg("");
     setError("");
-    if (tierN === 8) {
-      setPicks((p) => {
-        const cur = p[8] || [];
-        if (cur.includes(teamId))
-          return { ...p, 8: cur.filter((id) => id !== teamId) };
-        if (cur.length >= 2) return { ...p, 8: [cur[1], teamId] };
-        return { ...p, 8: [...cur, teamId] };
-      });
-    } else {
-      setPicks((p) => ({ ...p, [tierN]: p[tierN] === teamId ? null : teamId }));
-    }
+    const tier = TIERS.find((t) => t.n === tierN);
+    const cap = tier.pickCount;
+    setPicks((p) => {
+      const cur = p[tierN] || [];
+      if (cur.includes(teamId))
+        return { ...p, [tierN]: cur.filter((id) => id !== teamId) };
+      // At capacity: drop the earliest pick and add the new one.
+      if (cur.length >= cap) return { ...p, [tierN]: [...cur.slice(1), teamId] };
+      return { ...p, [tierN]: [...cur, teamId] };
+    });
   };
 
-  const slotIds = useMemo(() => {
-    const ids = [];
-    for (let i = 1; i <= 7; i++) ids.push(picks[i] || null);
-    const t8 = picks[8] || [];
-    ids.push(t8[0] || null);
-    ids.push(t8[1] || null);
-    return ids;
+  // One display slot per required pick, in tier order, padded with nulls.
+  const slots = useMemo(() => {
+    const out = [];
+    TIERS.forEach((t) => {
+      const cur = picks[t.n] || [];
+      for (let i = 0; i < t.pickCount; i++)
+        out.push({ id: cur[i] || null, tierN: t.n });
+    });
+    return out;
   }, [picks]);
 
+  const filledCount = slots.filter((s) => s.id).length;
+  const allPicked = TIERS.every(
+    (t) => (picks[t.n] || []).length === t.pickCount
+  );
+
   const complete =
-    slotIds.every(Boolean) &&
+    allPicked &&
     name.trim().length > 0 &&
     tiebreaker !== "" &&
     goldenBoot.trim().length > 0;
@@ -310,10 +325,14 @@ function PicksView({ locked, onSaved }) {
   const submit = async () => {
     setError("");
     if (!name.trim()) return setError("Add your name first.");
-    for (let i = 1; i <= 7; i++)
-      if (!picks[i]) return setError(`Pick a team from Tier ${i}.`);
-    if ((picks[8] || []).length !== 2)
-      return setError("Pick exactly two teams from Tier 8.");
+    for (const t of TIERS) {
+      if ((picks[t.n] || []).length !== t.pickCount)
+        return setError(
+          `Pick ${t.pickCount} team${t.pickCount > 1 ? "s" : ""} from Tier ${
+            t.n
+          }.`
+        );
+    }
     const tb = parseInt(tiebreaker, 10);
     if (isNaN(tb) || tb < 0)
       return setError("Tiebreaker must be a number (total goals in the final).");
@@ -322,18 +341,20 @@ function PicksView({ locked, onSaved }) {
     if (!slug) return setError("Name needs at least one letter or number.");
     setSaving(true);
     try {
+      const cleanPicks = {};
+      TIERS.forEach((t) => {
+        cleanPicks[t.n] = [...(picks[t.n] || [])];
+      });
       const entry = {
         name: name.trim(),
-        picks: { ...picks, 8: [...picks[8]] },
+        picks: cleanPicks,
         tiebreaker: tb,
         goldenBoot: goldenBoot.trim(),
         ts: Date.now(),
       };
       await storage.set("entry:" + slug, JSON.stringify(entry), true);
-      setSavedMsg(
-        `Picks saved for ${name.trim()}. Resubmit under the same name to change them before lock.`
-      );
-      if (onSaved) onSaved();
+      setSubmitted(entry);
+      window.scrollTo({ top: 0, behavior: "smooth" });
     } catch (e) {
       setError("Could not save your entry. Try again in a moment.");
     }
@@ -353,6 +374,80 @@ function PicksView({ locked, onSaved }) {
     );
   }
 
+  if (submitted) {
+    return (
+      <div className="pb-10">
+        <div className="bg-white border-2 border-emerald-300 rounded-xl p-6 text-center mb-4">
+          <div className="text-4xl mb-2">✅</div>
+          <div className="font-extrabold text-emerald-900 text-xl">
+            You&apos;re in, {submitted.name}!
+          </div>
+          <p className="text-stone-600 text-sm mt-2">
+            All {totalPicks} picks are saved. You can resubmit under the same
+            name to change them anytime before the opening kickoff — after that
+            they&apos;re locked.
+          </p>
+        </div>
+
+        <div className="bg-white border border-stone-200 rounded-xl p-4 mb-4">
+          <Eyebrow>Your lineup · {totalPicks} teams</Eyebrow>
+          <div className="mt-2">
+            {TIERS.map((t) => {
+              const ids = submitted.picks[t.n] || [];
+              return (
+                <div
+                  key={t.n}
+                  className="flex items-start justify-between gap-3 py-2 border-b border-stone-100 last:border-0"
+                >
+                  <span className="text-xs font-bold text-stone-400 uppercase tracking-wide whitespace-nowrap pt-0.5">
+                    Tier {t.n}
+                  </span>
+                  <span className="text-sm font-semibold text-stone-800 text-right">
+                    {ids.map((id) => (ALL_TEAMS[id] ? ALL_TEAMS[id].name : id)).join(", ")}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        <div className="bg-white border border-stone-200 rounded-xl p-4 mb-4">
+          <div className="flex justify-between py-1">
+            <span className="text-sm text-stone-600">Golden Boot</span>
+            <span className="text-sm font-semibold text-stone-800">
+              {submitted.goldenBoot}
+            </span>
+          </div>
+          <div className="flex justify-between py-1">
+            <span className="text-sm text-stone-600">
+              Final tiebreaker (goals)
+            </span>
+            <span className="text-sm font-semibold text-stone-800">
+              {submitted.tiebreaker}
+            </span>
+          </div>
+        </div>
+
+        <div className="flex gap-2">
+          <button
+            onClick={() => setSubmitted(null)}
+            className="flex-1 py-2.5 rounded-lg border border-stone-300 bg-white text-stone-700 font-bold text-sm hover:border-emerald-600"
+          >
+            Edit my picks
+          </button>
+          {onViewBoard && (
+            <button
+              onClick={onViewBoard}
+              className="flex-1 py-2.5 rounded-lg bg-emerald-800 text-white font-bold text-sm hover:bg-emerald-700"
+            >
+              View leaderboard
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="pb-36">
       <div className="bg-white border border-stone-200 rounded-xl p-4 mb-4">
@@ -361,10 +456,7 @@ function PicksView({ locked, onSaved }) {
         </label>
         <input
           value={name}
-          onChange={(e) => {
-            setName(e.target.value);
-            setSavedMsg("");
-          }}
+          onChange={(e) => setName(e.target.value)}
           placeholder="e.g. Curtis B"
           className="w-full border border-stone-300 rounded-lg px-3 py-2 text-stone-800 focus:outline-none focus:border-emerald-600"
         />
@@ -375,7 +467,7 @@ function PicksView({ locked, onSaved }) {
       </div>
 
       {TIERS.map((tier) => {
-        const t8 = picks[8] || [];
+        const cur = picks[tier.n] || [];
         return (
           <div
             key={tier.n}
@@ -386,7 +478,7 @@ function PicksView({ locked, onSaved }) {
                 Tier {tier.n} · pick {tier.pickCount}
               </Eyebrow>
               <span className="text-xs text-stone-500">
-                {tier.teams.length} teams
+                {cur.length}/{tier.pickCount} · {tier.teams.length} teams
               </span>
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
@@ -394,16 +486,15 @@ function PicksView({ locked, onSaved }) {
                 <TeamChip
                   key={tm.id}
                   team={tm}
-                  selected={
-                    tier.n === 8 ? t8.includes(tm.id) : picks[tier.n] === tm.id
-                  }
+                  selected={cur.includes(tm.id)}
                   onClick={() => pickTeam(tier.n, tm.id)}
                 />
               ))}
             </div>
-            {tier.n === 8 && (
+            {tier.pickCount > 1 && (
               <p className="text-xs text-stone-500 mt-2">
-                Selecting a third team swaps out your earliest Tier 8 pick.
+                Pick {tier.pickCount}. Selecting another team swaps out your
+                earliest pick in this tier.
               </p>
             )}
           </div>
@@ -417,10 +508,7 @@ function PicksView({ locked, onSaved }) {
         <input
           list="boot-suggestions"
           value={goldenBoot}
-          onChange={(e) => {
-            setGoldenBoot(e.target.value);
-            setSavedMsg("");
-          }}
+          onChange={(e) => setGoldenBoot(e.target.value)}
           placeholder="Start typing a player's name"
           className="w-full border border-stone-300 rounded-lg px-3 py-2 text-stone-800 focus:outline-none focus:border-emerald-600"
         />
@@ -458,11 +546,6 @@ function PicksView({ locked, onSaved }) {
           {error}
         </div>
       )}
-      {savedMsg && (
-        <div className="bg-emerald-50 border border-emerald-200 text-emerald-800 text-sm rounded-lg px-4 py-3 mb-4">
-          {savedMsg}
-        </div>
-      )}
 
       {/* Lineup card */}
       <div className="fixed bottom-0 left-0 right-0 bg-emerald-950 border-t-4 border-amber-400 px-4 py-3 z-10">
@@ -472,21 +555,21 @@ function PicksView({ locked, onSaved }) {
               Lineup card
             </span>
             <span className="text-emerald-200 text-xs font-mono">
-              {slotIds.filter(Boolean).length}/9 picked
+              {filledCount}/{totalPicks} picked
             </span>
           </div>
           <div className="flex flex-wrap gap-1 mb-2">
-            {slotIds.map((id, i) => (
+            {slots.map((s, i) => (
               <span
                 key={i}
                 className={
                   "px-2 py-1 rounded text-xs font-mono " +
-                  (id
+                  (s.id
                     ? "bg-emerald-700 text-white"
                     : "bg-emerald-900 text-emerald-500 border border-emerald-800")
                 }
               >
-                {id || (i < 7 ? `T${i + 1}` : "T8")}
+                {s.id || `T${s.tierN}`}
               </span>
             ))}
           </div>
@@ -695,12 +778,12 @@ function RulesView() {
       <div className="bg-white border border-stone-200 rounded-xl p-4 mb-4">
         <Eyebrow>How it works</Eyebrow>
         <p className="text-sm text-stone-700 mt-2">
-          Pick one team from each of Tiers 1 through 7 and two teams from Tier
-          8, nine teams total. You also pick the Golden Boot winner, the
-          tournament&apos;s top scorer, for a bonus. Your teams earn points all
-          tournament long. Duplicated rosters are allowed. Entries lock at the
-          opening kickoff, June 11 at 3:00 PM ET. Tiebreaker is total goals in
-          the Final, closest without going over.
+          Pick the listed number of teams from each tier (most are one, some are
+          two), {TIERS.reduce((s, t) => s + t.pickCount, 0)} teams in all. You
+          also pick the Golden Boot winner, the tournament&apos;s top scorer, for
+          a bonus. Your teams earn points all tournament long. Duplicated rosters
+          are allowed. Entries lock at the opening kickoff, June 11 at 3:00 PM
+          ET. Tiebreaker is total goals in the Final, closest without going over.
         </p>
       </div>
       <div className="bg-white border border-stone-200 rounded-xl p-4 mb-4">
@@ -1167,7 +1250,7 @@ export default function WorldCupTierPool() {
             Warming up…
           </div>
         ) : tab === "picks" ? (
-          <PicksView locked={locked} />
+          <PicksView locked={locked} onViewBoard={() => setTab("board")} />
         ) : tab === "board" ? (
           <LeaderboardView results={results} settings={settings} />
         ) : tab === "rules" ? (
