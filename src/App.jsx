@@ -1331,16 +1331,19 @@ function ResultsView({ live }) {
     );
   }
 
-  const isLive = (m) => m.status === "IN_PLAY" || m.status === "PAUSED";
-  const isDone = (m) => m.status === "FINISHED";
-  const isUpcoming = (m) => m.status === "SCHEDULED" || m.status === "TIMED";
+  // Categorize by kickoff time, not just feed status. football-data's free tier
+  // leaves a finished match marked TIMED for ~30 min before posting the result,
+  // so a match that has already kicked off must never fall into "Upcoming" — it
+  // belongs in results/live (with its live or carried score, or just "started").
+  const now = Date.now();
+  const started = (m) => new Date(m.utcDate).getTime() <= now;
 
   const recent = matches
-    .filter((m) => isLive(m) || isDone(m))
+    .filter(started)
     .sort((a, b) => new Date(b.utcDate) - new Date(a.utcDate))
     .slice(0, 20);
   const upcoming = matches
-    .filter(isUpcoming)
+    .filter((m) => !started(m))
     .sort((a, b) => new Date(a.utcDate) - new Date(b.utcDate))
     .slice(0, 12);
 
