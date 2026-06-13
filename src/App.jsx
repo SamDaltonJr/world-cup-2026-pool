@@ -199,6 +199,41 @@ function teamPoints(r) {
   return pts;
 }
 
+// How many games a team has actually played and the most pool points those
+// played games could have yielded — the team's "ceiling so far". Derived from
+// the live feed (group standings + finished knockout matches) so it always
+// reflects real play. Group game ceiling is a win (3); a completed group also
+// puts the +3 group-winner bonus on the table; each knockout game ceiling is
+// that round's win value. Returns { played, max }. Points actually earned come
+// from the commissioner-confirmed results (teamPoints), so earned never exceeds
+// this max in normal operation (the feed leads the commissioner's edits).
+function teamCeiling(id, live) {
+  let played = 0;
+  let max = 0;
+  if (!live || !id) return { played, max };
+  (live.standings || []).forEach((g) => {
+    (g.table || []).forEach((row) => {
+      if (liveTeamToId(row.code, row.name) !== id) return;
+      const gp = Math.min(3, row.played || 0);
+      played += gp;
+      max += gp * SCORING.groupWin;
+      // Group finished: winning it was achievable, so add the winner bonus.
+      if ((row.played || 0) >= 3) max += SCORING.groupWinner;
+    });
+  });
+  (live.matches || []).forEach((mt) => {
+    const ko = STAGE_TO_KO[mt.stage];
+    if (!ko || mt.status !== "FINISHED" || mt._provisional) return;
+    const hId = liveTeamToId(mt.home && mt.home.code, mt.home && mt.home.name);
+    const aId = liveTeamToId(mt.away && mt.away.code, mt.away && mt.away.name);
+    if (hId !== id && aId !== id) return;
+    played += 1;
+    const stage = KO_STAGES.find((s) => s.key === ko);
+    if (stage) max += stage.pts;
+  });
+  return { played, max };
+}
+
 // ---------- Live feed: provider -> pool mapping & scoring derivation ----------
 // The `live` payload is written to Supabase by scripts/sync-results.mjs and has
 // the shape: { updatedAt, source, matches:[...], standings:[...] }.
@@ -814,10 +849,11 @@ function PicksView({ locked, onViewBoard }) {
 
 // ---------- Leaderboard ----------
 
-function LeaderboardView({ results, settings, locked }) {
+function LeaderboardView({ results, settings, locked, live }) {
   const [entries, setEntries] = useState(null);
   const [expanded, setExpanded] = useState(null);
   const [loadError, setLoadError] = useState("");
+  const [sortBy, setSortBy] = useState("total"); // "total" | "pct"
 
   const loadEntries = async () => {
     setLoadError("");
@@ -855,15 +891,39 @@ function LeaderboardView({ results, settings, locked }) {
           (sum, id) => sum + teamPoints(results[id]),
           0
         );
+        // Games played and ceiling across this entry's teams (from the feed).
+        const ceiling = ids.reduce(
+          (acc, id) => {
+            const c = teamCeiling(id, live);
+            acc.played += c.played;
+            acc.max += c.max;
+            return acc;
+          },
+          { played: 0, max: 0 }
+        );
         const bootBonus =
           settings.goldenBootWinner &&
           bootMatch(e.goldenBoot, settings.goldenBootWinner)
             ? GOLDEN_BOOT_PTS
             : 0;
-        return { ...e, total: teamTotal + bootBonus, bootBonus, ids };
+        return {
+          ...e,
+          total: teamTotal + bootBonus,
+          teamTotal,
+          bootBonus,
+          ids,
+          played: ceiling.played,
+          maxPts: ceiling.max,
+          // Share of the ceiling banked so far (team points only, no boot bonus).
+          pct: ceiling.max ? teamTotal / ceiling.max : 0,
+        };
       })
-      .sort((a, b) => b.total - a.total || a.ts - b.ts);
-  }, [entries, results, settings]);
+      .sort((a, b) =>
+        sortBy === "pct"
+          ? b.pct - a.pct || b.total - a.total || a.ts - b.ts
+          : b.total - a.total || a.ts - b.ts
+      );
+  }, [entries, results, settings, live, sortBy]);
 
   if (entries === null)
     return (
@@ -928,6 +988,28 @@ function LeaderboardView({ results, settings, locked }) {
           Refresh
         </button>
       </div>
+      <div className="flex items-center gap-2 mb-3">
+        <span className="text-xs font-semibold text-stone-500">Sort by</span>
+        <div className="inline-flex rounded-lg border border-stone-300 overflow-hidden">
+          {[
+            ["total", "Total points"],
+            ["pct", "% of possible"],
+          ].map(([val, label]) => (
+            <button
+              key={val}
+              onClick={() => setSortBy(val)}
+              className={
+                "px-3 py-1.5 text-xs font-bold " +
+                (sortBy === val
+                  ? "bg-emerald-800 text-white"
+                  : "bg-white text-stone-600 hover:bg-stone-100")
+              }
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
       {loadError && (
         <div className="bg-amber-50 border border-amber-200 text-amber-800 text-sm rounded-lg px-4 py-3 mb-3">
           {loadError}
@@ -950,19 +1032,47 @@ function LeaderboardView({ results, settings, locked }) {
               onClick={() => setExpanded(isOpen ? null : slug)}
               className="w-full flex items-center justify-between px-4 py-3 text-left"
             >
-              <div className="flex items-center gap-3">
-                <span className="w-7 text-center font-mono text-sm text-stone-400">
+              <div className="flex items-center gap-3 min-w-0">
+                <span className="w-7 text-center font-mono text-sm text-stone-400 shrink-0">
                   {i + 1}
                 </span>
-                <span className="font-semibold text-stone-800">{e.name}</span>
+                <div className="min-w-0">
+                  <span className="font-semibold text-stone-800">{e.name}</span>
+                  <div className="text-xs text-stone-400 font-mono">
+                    {e.played > 0
+                      ? `${e.played} game${e.played === 1 ? "" : "s"} played · ${
+                          e.teamTotal
+                        } of ${e.maxPts} possible`
+                      : "no games played yet"}
+                  </div>
+                </div>
               </div>
               <div className="flex items-center gap-3">
                 <span className="text-xs text-stone-400 font-mono">
                   TB {e.tiebreaker}
                 </span>
-                <span className="font-mono font-bold text-emerald-800 text-lg">
-                  {e.total}
-                </span>
+                <div className="w-12 text-right">
+                  <div
+                    className={
+                      "font-mono font-bold leading-none " +
+                      (sortBy === "pct"
+                        ? "text-emerald-800 text-lg"
+                        : "text-stone-400 text-xs")
+                    }
+                  >
+                    {e.maxPts ? Math.round(e.pct * 100) + "%" : "—"}
+                  </div>
+                  <div
+                    className={
+                      "font-mono font-bold leading-none " +
+                      (sortBy === "pct"
+                        ? "text-stone-400 text-xs mt-0.5"
+                        : "text-emerald-800 text-lg")
+                    }
+                  >
+                    {e.total}
+                  </div>
+                </div>
               </div>
             </button>
             {isOpen && (
@@ -971,6 +1081,7 @@ function LeaderboardView({ results, settings, locked }) {
                   const tm = ALL_TEAMS[id];
                   const r = results[id];
                   const pts = teamPoints(r);
+                  const c = teamCeiling(id, live);
                   return (
                     <div
                       key={id}
@@ -989,9 +1100,13 @@ function LeaderboardView({ results, settings, locked }) {
                         </span>
                         <Flag id={id} className="mr-1.5 align-[-2px]" />
                         {tm ? tm.name : id}
+                        <span className="font-mono text-xs text-stone-400 ml-2">
+                          {c.played} GP
+                        </span>
                       </span>
                       <span className="font-mono text-sm text-stone-600">
                         {pts}
+                        <span className="text-stone-400"> / {c.max}</span>
                       </span>
                     </div>
                   );
@@ -1985,6 +2100,7 @@ export default function WorldCupTierPool() {
             results={results}
             settings={settings}
             locked={locked}
+            live={live}
           />
         ) : activeTab === "results" ? (
           <ResultsView live={live} />
