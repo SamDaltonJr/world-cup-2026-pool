@@ -1188,16 +1188,42 @@ function AnalysisView({ locked }) {
     return out;
   }, [entries]);
 
-  // Golden Boot popularity (free-text, so just group by the trimmed string).
+  // Golden Boot popularity. Picks are free text, so the same player shows up
+  // spelled different ways — with or without a country tag, accents dropped, or
+  // just a surname. Consolidate with the same matcher the scoring uses
+  // (bootMatch), so picks that would be credited to one winner show as one row:
+  // "Mbappe", "Kylian Mbappé (France)" and "kylian mbappe" all land together.
+  // Each group is then labeled with its most popular raw spelling.
   const bootCounts = useMemo(() => {
-    const map = {};
+    const groups = []; // { variants: { raw: count }, count }
     (entries || []).forEach((e) => {
-      const b = (e.goldenBoot || "").trim();
-      if (b) map[b] = (map[b] || 0) + 1;
+      const raw = (e.goldenBoot || "").trim();
+      if (!raw || !normName(raw)) return;
+      let g = groups.find((grp) =>
+        Object.keys(grp.variants).some((v) => bootMatch(v, raw))
+      );
+      if (!g) {
+        g = { variants: {}, count: 0 };
+        groups.push(g);
+      }
+      g.count += 1;
+      g.variants[raw] = (g.variants[raw] || 0) + 1;
     });
-    return Object.entries(map).sort(
-      (a, b) => b[1] - a[1] || a[0].localeCompare(b[0])
-    );
+    const labelFor = (variants) =>
+      Object.keys(variants).sort(
+        (a, b) =>
+          variants[b] - variants[a] || // most-picked spelling wins
+          Number(b.includes("(")) - Number(a.includes("(")) || // prefer a country tag
+          b.length - a.length || // then the more complete name
+          a.localeCompare(b)
+      )[0];
+    return groups
+      .map((g) => ({
+        label: labelFor(g.variants),
+        count: g.count,
+        variants: Object.keys(g.variants),
+      }))
+      .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
   }, [entries]);
 
   if (entries === null)
@@ -1290,13 +1316,24 @@ function AnalysisView({ locked }) {
         <div className="bg-white border border-stone-200 rounded-xl p-4">
           <Eyebrow>Golden Boot picks</Eyebrow>
           <div className="mt-2">
-            {bootCounts.map(([name, count]) => (
+            {bootCounts.map(({ label, count, variants }) => (
               <div
-                key={name}
-                className="flex items-center justify-between py-1 border-b border-stone-100 last:border-0"
+                key={label}
+                className="flex items-center justify-between gap-2 py-1 border-b border-stone-100 last:border-0"
               >
-                <span className="text-sm text-stone-700">{name}</span>
-                <span className="text-xs font-mono text-stone-500">
+                <span className="text-sm text-stone-700 min-w-0">
+                  <span className="truncate">{label}</span>
+                  {variants.length > 1 && (
+                    <span
+                      className="text-xs text-stone-400 ml-1.5"
+                      title={"Also: " + variants.filter((v) => v !== label).join(", ")}
+                    >
+                      +{variants.length - 1} spelling
+                      {variants.length - 1 === 1 ? "" : "s"}
+                    </span>
+                  )}
+                </span>
+                <span className="text-xs font-mono text-stone-500 shrink-0">
                   {count} · {total ? Math.round((count / total) * 100) : 0}%
                 </span>
               </div>
