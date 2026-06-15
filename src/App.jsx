@@ -1463,11 +1463,73 @@ function GroupTable({ g }) {
   );
 }
 
+// Local-calendar-day key (YYYY-MM-DD) for a match date, so matches group by the
+// viewer's day. Lexicographic order on these keys matches chronological order.
+function dayKeyOf(d) {
+  return (
+    d.getFullYear() +
+    "-" +
+    String(d.getMonth() + 1).padStart(2, "0") +
+    "-" +
+    String(d.getDate()).padStart(2, "0")
+  );
+}
+
 function ResultsView({ live }) {
   const matches = (live && live.matches) || [];
   const standings = ((live && live.standings) || [])
     .slice()
     .sort((a, b) => (a.group || "").localeCompare(b.group || ""));
+
+  // Bucket matches into local calendar days, each sorted by kickoff time.
+  const days = useMemo(() => {
+    const map = new Map();
+    matches.forEach((m) => {
+      const d = new Date(m.utcDate);
+      if (isNaN(d.getTime())) return;
+      const key = dayKeyOf(d);
+      let day = map.get(key);
+      if (!day) {
+        day = {
+          key,
+          label: d.toLocaleDateString(undefined, {
+            weekday: "short",
+            month: "short",
+            day: "numeric",
+          }),
+          matches: [],
+        };
+        map.set(key, day);
+      }
+      day.matches.push(m);
+    });
+    const arr = [...map.values()].sort((a, b) => a.key.localeCompare(b.key));
+    arr.forEach((day) =>
+      day.matches.sort((a, b) => new Date(a.utcDate) - new Date(b.utcDate))
+    );
+    return arr;
+  }, [matches]);
+
+  // Default to today if it has matches, else the most recent past match day,
+  // else the first upcoming day.
+  const defaultKey = useMemo(() => {
+    if (!days.length) return null;
+    const todayKey = dayKeyOf(new Date());
+    if (days.some((d) => d.key === todayKey)) return todayKey;
+    const past = days.filter((d) => d.key < todayKey);
+    if (past.length) return past[past.length - 1].key;
+    return days[0].key;
+  }, [days]);
+
+  const [dayKey, setDayKey] = useState(null);
+  // Land on the default day on first load; re-home only if the chosen day drops
+  // out of the feed (otherwise the viewer's manual day choice is preserved
+  // across the 1-minute live-poll refreshes).
+  useEffect(() => {
+    if (dayKey === null || !days.some((d) => d.key === dayKey)) {
+      setDayKey(defaultKey);
+    }
+  }, [days, defaultKey, dayKey]);
 
   if (!live || (matches.length === 0 && standings.length === 0)) {
     return (
@@ -1483,21 +1545,12 @@ function ResultsView({ live }) {
     );
   }
 
-  // Categorize by kickoff time, not just feed status. football-data's free tier
-  // leaves a finished match marked TIMED for ~30 min before posting the result,
-  // so a match that has already kicked off must never fall into "Upcoming" — it
-  // belongs in results/live (with its live or carried score, or just "started").
-  const now = Date.now();
-  const started = (m) => new Date(m.utcDate).getTime() <= now;
-
-  const recent = matches
-    .filter(started)
-    .sort((a, b) => new Date(b.utcDate) - new Date(a.utcDate))
-    .slice(0, 20);
-  const upcoming = matches
-    .filter((m) => !started(m))
-    .sort((a, b) => new Date(a.utcDate) - new Date(b.utcDate))
-    .slice(0, 12);
+  const index = Math.max(
+    0,
+    days.findIndex((d) => d.key === (dayKey || defaultKey))
+  );
+  const currentDay = days[index];
+  const onDefaultDay = !currentDay || currentDay.key === defaultKey;
 
   return (
     <div>
@@ -1509,14 +1562,63 @@ function ResultsView({ live }) {
         </span>
       </div>
 
-      {recent.length > 0 && (
+      {currentDay && (
         <div className="bg-white border border-stone-200 rounded-xl p-3 mb-4">
-          <div className="text-xs font-bold text-stone-400 uppercase tracking-wide mb-1">
-            Results &amp; live
+          <div className="flex items-center justify-between gap-2">
+            <button
+              onClick={() => index > 0 && setDayKey(days[index - 1].key)}
+              disabled={index <= 0}
+              className={
+                "w-8 h-8 rounded-lg text-lg font-bold shrink-0 " +
+                (index <= 0
+                  ? "text-stone-300"
+                  : "text-emerald-800 hover:bg-stone-100")
+              }
+              aria-label="Previous day"
+            >
+              ‹
+            </button>
+            <div className="text-center min-w-0">
+              <div className="text-sm font-bold text-stone-800">
+                {currentDay.label}
+              </div>
+              <div className="text-[11px] text-stone-400">
+                Day {index + 1} of {days.length} · {currentDay.matches.length}{" "}
+                match{currentDay.matches.length === 1 ? "" : "es"}
+                {!onDefaultDay && (
+                  <>
+                    {" · "}
+                    <button
+                      onClick={() => setDayKey(defaultKey)}
+                      className="font-semibold text-emerald-700 hover:text-emerald-900"
+                    >
+                      Today
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+            <button
+              onClick={() =>
+                index < days.length - 1 && setDayKey(days[index + 1].key)
+              }
+              disabled={index >= days.length - 1}
+              className={
+                "w-8 h-8 rounded-lg text-lg font-bold shrink-0 " +
+                (index >= days.length - 1
+                  ? "text-stone-300"
+                  : "text-emerald-800 hover:bg-stone-100")
+              }
+              aria-label="Next day"
+            >
+              ›
+            </button>
           </div>
-          {recent.map((m) => (
-            <MatchRow key={m.id} m={m} />
-          ))}
+          <div className="mt-2 border-t border-stone-100">
+            {currentDay.matches.map((m) => (
+              <MatchRow key={m.id} m={m} />
+            ))}
+          </div>
         </div>
       )}
 
@@ -1531,17 +1633,6 @@ function ResultsView({ live }) {
             ))}
           </div>
         </>
-      )}
-
-      {upcoming.length > 0 && (
-        <div className="bg-white border border-stone-200 rounded-xl p-3 mt-1">
-          <div className="text-xs font-bold text-stone-400 uppercase tracking-wide mb-1">
-            Upcoming
-          </div>
-          {upcoming.map((m) => (
-            <MatchRow key={m.id} m={m} />
-          ))}
-        </div>
       )}
 
       <p className="text-xs text-stone-400 mt-3">
