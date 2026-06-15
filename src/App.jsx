@@ -1136,7 +1136,7 @@ function LeaderboardView({ results, settings, locked, live }) {
 
 // ---------- Analysis (pick distribution) ----------
 
-function AnalysisView({ locked }) {
+function AnalysisView({ locked, results }) {
   const [entries, setEntries] = useState(null);
   const [loadError, setLoadError] = useState("");
 
@@ -1187,6 +1187,77 @@ function AnalysisView({ locked }) {
     });
     return out;
   }, [entries]);
+
+  // Most valuable picks: every team someone picked, ranked by pool points
+  // earned so far, with how many entries own it. Surfaces chalk that's
+  // delivering and low-owned teams quietly carrying someone.
+  const valueRows = useMemo(() => {
+    const rows = [];
+    TIERS.forEach((t) => {
+      t.teams.forEach((tm) => {
+        const count = tierCounts[t.n] ? tierCounts[t.n][tm.id] || 0 : 0;
+        if (!count) return;
+        rows.push({
+          id: tm.id,
+          name: tm.name,
+          tier: t.n,
+          count,
+          pts: teamPoints(results[tm.id]),
+        });
+      });
+    });
+    return rows.sort(
+      (a, b) => b.pts - a.pts || b.count - a.count || a.name.localeCompare(b.name)
+    );
+  }, [tierCounts, results]);
+
+  // Consensus lineup: the most-picked team(s) in each tier, scored on the live
+  // results — the chalk entry. Optimal lineup: the best-scoring team(s) in each
+  // tier, i.e. the most any valid entry could possibly have scored so far.
+  const lineupOf = (rankFn) => {
+    const picks = [];
+    TIERS.forEach((t) => {
+      [...t.teams]
+        .map((tm) => ({
+          id: tm.id,
+          name: tm.name,
+          tier: t.n,
+          count: tierCounts[t.n] ? tierCounts[t.n][tm.id] || 0 : 0,
+          pts: teamPoints(results[tm.id]),
+        }))
+        .sort(rankFn)
+        .slice(0, t.pickCount)
+        .forEach((p) => picks.push(p));
+    });
+    return { picks, total: picks.reduce((s, p) => s + p.pts, 0) };
+  };
+
+  const consensusLineup = useMemo(
+    () =>
+      lineupOf(
+        (a, b) => b.count - a.count || b.pts - a.pts || a.name.localeCompare(b.name)
+      ),
+    [tierCounts, results]
+  );
+  const optimalLineup = useMemo(
+    () =>
+      lineupOf(
+        (a, b) => b.pts - a.pts || b.count - a.count || a.name.localeCompare(b.name)
+      ),
+    [tierCounts, results]
+  );
+
+  // Each entry's team-point total (no Golden Boot bonus), high to low, so the
+  // benchmark lineups can be slotted against the real field.
+  const entryTotals = useMemo(
+    () =>
+      (entries || [])
+        .map((e) =>
+          entryTeamIds(e).reduce((s, id) => s + teamPoints(results[id]), 0)
+        )
+        .sort((a, b) => b - a),
+    [entries, results]
+  );
 
   // Golden Boot popularity. Picks are free text, so the same player shows up
   // spelled different ways — with or without a country tag, accents dropped, or
@@ -1265,6 +1336,114 @@ function AnalysisView({ locked }) {
           {loadError}
         </div>
       )}
+
+      {valueRows.length > 0 && (
+        <div className="bg-white border border-stone-200 rounded-xl p-4 mb-4">
+          <div className="flex items-baseline justify-between mb-2">
+            <Eyebrow>Most valuable picks</Eyebrow>
+            <span className="text-xs text-stone-400">points · ownership</span>
+          </div>
+          {valueRows.slice(0, 15).map(({ id, name, tier, count, pts }) => {
+            const pct = total ? Math.round((count / total) * 100) : 0;
+            const topPts = valueRows[0].pts;
+            const w = topPts > 0 ? Math.round((pts / topPts) * 100) : 0;
+            return (
+              <div key={id} className="py-1.5">
+                <div className="flex items-center justify-between gap-2 mb-1">
+                  <span className="flex items-center gap-1.5 text-sm text-stone-700 min-w-0">
+                    <span className="font-mono text-xs text-stone-400">
+                      T{tier}
+                    </span>
+                    <Flag id={id} />
+                    <span className="truncate">{name}</span>
+                  </span>
+                  <span className="text-xs font-mono text-stone-500 shrink-0">
+                    <span className="font-bold text-emerald-800">{pts} pts</span>
+                    {" · "}
+                    {count} · {pct}%
+                  </span>
+                </div>
+                <div className="h-2 rounded bg-stone-100 overflow-hidden">
+                  <div
+                    className={
+                      "h-full rounded " +
+                      (pts > 0 ? "bg-emerald-600" : "bg-stone-200")
+                    }
+                    style={{ width: w + "%" }}
+                  />
+                </div>
+              </div>
+            );
+          })}
+          {valueRows.length > 15 && (
+            <p className="text-xs text-stone-400 mt-2">
+              Showing the top 15 of {valueRows.length} picked teams by points.
+            </p>
+          )}
+          <p className="text-xs text-stone-400 mt-2">
+            Points come from the commissioner-confirmed results; ownership is the
+            share of entries that picked the team.
+          </p>
+        </div>
+      )}
+
+      {[
+        {
+          key: "consensus",
+          title: "Consensus lineup",
+          lineup: consensusLineup,
+          blurb: (() => {
+            const rank =
+              entryTotals.filter((t) => t > consensusLineup.total).length + 1;
+            return `The most-picked team in each tier — the chalk entry. Would rank #${rank} of ${total} on the current leaderboard.`;
+          })(),
+        },
+        {
+          key: "optimal",
+          title: "Highest-scoring possible lineup",
+          lineup: optimalLineup,
+          blurb: (() => {
+            const leader = entryTotals[0] || 0;
+            const gap = optimalLineup.total - leader;
+            return (
+              "The best team in each tier by points so far — the most any valid lineup could have scored. " +
+              (gap > 0
+                ? `The top entry sits ${gap} point${gap === 1 ? "" : "s"} behind it.`
+                : "Someone in the field has matched it.")
+            );
+          })(),
+        },
+      ].map(({ key, title, lineup, blurb }) => (
+        <div
+          key={key}
+          className="bg-white border border-stone-200 rounded-xl p-4 mb-4"
+        >
+          <div className="flex items-baseline justify-between mb-1">
+            <Eyebrow>{title}</Eyebrow>
+            <span className="font-mono font-bold text-emerald-800 text-lg">
+              {lineup.total}
+            </span>
+          </div>
+          <p className="text-xs text-stone-500 mb-3">{blurb}</p>
+          <div className="flex flex-wrap gap-1.5">
+            {lineup.picks.map((p) => (
+              <span
+                key={p.id}
+                className="inline-flex items-center gap-1 px-2 py-1 rounded-lg border border-stone-200 bg-stone-50 text-xs"
+              >
+                <span className="font-mono text-[10px] text-stone-400">
+                  T{p.tier}
+                </span>
+                <Flag id={p.id} />
+                <span className="font-semibold text-stone-700">{p.name}</span>
+                <span className="font-mono font-bold text-emerald-800">
+                  {p.pts}
+                </span>
+              </span>
+            ))}
+          </div>
+        </div>
+      ))}
 
       {TIERS.map((tier) => {
         const rows = tier.teams
@@ -2233,7 +2412,7 @@ export default function WorldCupTierPool() {
         ) : activeTab === "results" ? (
           <ResultsView live={live} />
         ) : activeTab === "analysis" ? (
-          <AnalysisView locked={locked} />
+          <AnalysisView locked={locked} results={results} />
         ) : activeTab === "rules" ? (
           <RulesView />
         ) : (
