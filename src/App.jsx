@@ -1844,6 +1844,7 @@ function ForecastView({ live, locked, results }) {
                     tier: ALL_TEAMS[id] ? ALL_TEAMS[id].tier : "?",
                     proj: proj.teams[id] ? proj.teams[id].projPts : 0,
                     now: teamPoints(results[id]),
+                    max: teamCeiling(id, live).max, // most those games could yield
                   }))
                   .sort((a, b) => b.proj - a.proj);
                 return (
@@ -1894,7 +1895,9 @@ function ForecastView({ live, locked, results }) {
                               <span className="truncate">{t.name}</span>
                             </span>
                             <span className="font-mono text-xs shrink-0">
-                              <span className="text-stone-400">now {t.now}</span>
+                              <span className="text-stone-400">
+                                now {t.now}/{t.max}
+                              </span>
                               {" · "}
                               <span className="font-bold text-emerald-800">
                                 {t.proj.toFixed(1)}
