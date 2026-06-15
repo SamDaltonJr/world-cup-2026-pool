@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo } from "react";
 import { storage } from "./storage.js";
 import { isConfigured } from "./supabaseClient.js";
+import { projectTournament } from "./projections.js";
 
 // ============================================================
 // WORLD CUP 2026 TIER POOL
@@ -1524,6 +1525,440 @@ function AnalysisView({ locked, results }) {
   );
 }
 
+// ---------- Projections (Elo Monte Carlo) ----------
+
+// Format a probability (0..1) for display: tiny-but-nonzero reads "<1%", a dead
+// zero reads "—" so the table doesn't fill with noise.
+function pct(x) {
+  if (!x) return "—";
+  if (x >= 0.995) return "99%+";
+  if (x < 0.005) return "<1%";
+  return Math.round(x * 100) + "%";
+}
+
+// A projected final group table: teams ranked by expected league points, with
+// the full odds of finishing in each spot 1–4. Each team's most-likely finish
+// is emphasized, and the two projected qualifiers are highlighted in emerald.
+function ProjGroupTable({ g }) {
+  return (
+    <div className="bg-white border border-stone-200 rounded-xl p-3 mb-3">
+      <div className="text-xs font-bold text-stone-500 uppercase tracking-wide mb-1">
+        Group {g.group}
+      </div>
+      <table className="w-full text-sm">
+        <thead>
+          <tr className="text-[11px] text-stone-400">
+            <th className="text-left font-medium py-1">Team</th>
+            <th className="w-8 text-center font-medium" title="Expected final group points">
+              Pts
+            </th>
+            <th className="w-8 text-center font-medium" title="Finish 1st (win group)">
+              1st
+            </th>
+            <th className="w-8 text-center font-medium" title="Finish 2nd">2nd</th>
+            <th className="w-8 text-center font-medium" title="Finish 3rd">3rd</th>
+            <th className="w-8 text-center font-medium" title="Finish 4th">4th</th>
+            <th
+              className="w-10 text-center font-medium"
+              title="Advance to the knockouts (top two, or as one of the eight best third-place teams)"
+            >
+              Adv
+            </th>
+          </tr>
+        </thead>
+        <tbody>
+          {g.table.map((r, i) => {
+            const tm = ALL_TEAMS[r.id];
+            const top = i < 2;
+            // The position this team is likeliest to finish, so we can bold it.
+            const modal = r.place.indexOf(Math.max(...r.place));
+            return (
+              <tr key={r.id} className="border-t border-stone-100">
+                <td
+                  className={
+                    "py-1 " + (top ? "font-bold text-emerald-900" : "text-stone-700")
+                  }
+                >
+                  <span className="font-mono text-[11px] text-stone-400 mr-1">
+                    {i + 1}
+                  </span>
+                  <Flag id={r.id} className="mr-1.5 align-[-2px]" />
+                  {tm ? tm.name : r.id}
+                </td>
+                <td className="text-center font-bold text-stone-800">
+                  {r.projGroupPts.toFixed(1)}
+                </td>
+                {r.place.map((p, j) => (
+                  <td
+                    key={j}
+                    className={
+                      "text-center font-mono text-[11px] " +
+                      (j === modal
+                        ? "font-bold text-emerald-800"
+                        : "text-stone-400")
+                    }
+                  >
+                    {pct(p)}
+                  </td>
+                ))}
+                <td className="text-center font-mono text-[11px] font-bold text-emerald-800">
+                  {pct(r.advance)}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function ForecastView({ live, locked, results }) {
+  const [entries, setEntries] = useState(null);
+  const [loadError, setLoadError] = useState("");
+  const [proj, setProj] = useState(null);
+  const [computing, setComputing] = useState(false);
+  const [sims, setSims] = useState(10000);
+  const [sortBy, setSortBy] = useState("pts"); // "pts" | "champ"
+
+  const loadEntries = async () => {
+    setLoadError("");
+    try {
+      const listed = await storage.list("entry:", true);
+      const keys = (listed && listed.keys) || [];
+      const loaded = [];
+      await Promise.all(
+        keys.map(async (k) => {
+          try {
+            const res = await storage.get(k, true);
+            if (res && res.value) loaded.push(JSON.parse(res.value));
+          } catch (e) {
+            // skip unreadable entry
+          }
+        })
+      );
+      setEntries(loaded);
+    } catch (e) {
+      setEntries([]);
+      setLoadError("Could not load entries; team projections still run.");
+    }
+  };
+
+  useEffect(() => {
+    loadEntries();
+  }, []);
+
+  // Run the simulation off the render path so the spinner can paint first. Pool
+  // (entry-level) projection only runs once entries are unlocked.
+  useEffect(() => {
+    if (!live || entries === null) return;
+    setComputing(true);
+    const id = setTimeout(() => {
+      const entryList = locked
+        ? entries.map((e) => ({ name: e.name, ids: entryTeamIds(e) }))
+        : [];
+      const out = projectTournament({
+        live,
+        resolveTeam: liveTeamToId,
+        scorePoints: teamPoints,
+        stageToKo: STAGE_TO_KO,
+        entries: entryList,
+        sims,
+      });
+      setProj(out);
+      setComputing(false);
+    }, 30);
+    return () => clearTimeout(id);
+  }, [live, entries, sims, locked]);
+
+  const teamRows = useMemo(() => {
+    if (!proj || !proj.ok) return [];
+    return Object.keys(proj.teams)
+      .map((id) => {
+        const t = proj.teams[id];
+        return {
+          id,
+          name: ALL_TEAMS[id] ? ALL_TEAMS[id].name : id,
+          tier: ALL_TEAMS[id] ? ALL_TEAMS[id].tier : "?",
+          eloDelta: t.elo - t.eloBase, // movement since the pre-tournament snapshot
+          ...t,
+        };
+      })
+      .sort((a, b) =>
+        sortBy === "champ"
+          ? b.champ - a.champ || b.projPts - a.projPts
+          : b.projPts - a.projPts || b.champ - a.champ
+      );
+  }, [proj, sortBy]);
+
+  // Pool forecast: each entry's projected total + win probability, alongside its
+  // current confirmed total for contrast.
+  const poolRows = useMemo(() => {
+    if (!proj || !proj.ok || !entries) return [];
+    return (proj.entries || [])
+      .map((e, i) => {
+        const src = entries[i];
+        const now = src
+          ? entryTeamIds(src).reduce((s, id) => s + teamPoints(results[id]), 0)
+          : 0;
+        return { ...e, now };
+      })
+      .sort((a, b) => b.winProb - a.winProb || b.projTotal - a.projTotal);
+  }, [proj, entries, results]);
+
+  if (!live) {
+    return (
+      <div className="bg-white border border-stone-200 rounded-xl p-6 text-center">
+        <div className="text-3xl mb-2">📡</div>
+        <div className="font-bold text-stone-800">No live data yet</div>
+        <p className="text-stone-600 text-sm mt-1">
+          Projections need the group fixtures from the live feed. They&apos;ll
+          appear here once the sync has run.
+        </p>
+      </div>
+    );
+  }
+
+  // Always rank the title-odds card by championship probability, independent of
+  // the team table's sort toggle (keeps the bars scaled to the true leader).
+  const topChamp = [...teamRows].sort((a, b) => b.champ - a.champ).slice(0, 10);
+  const maxChamp = topChamp.length ? topChamp[0].champ : 0;
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-3 gap-2 flex-wrap">
+        <Eyebrow>Projections</Eyebrow>
+        <span className="text-xs text-stone-400">
+          Elo Monte Carlo · {(proj ? proj.sims : sims).toLocaleString()} sims
+        </span>
+      </div>
+
+      <div className="bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs rounded-lg px-4 py-3 mb-3">
+        Each simulation plays out the remaining group games and the full knockout
+        bracket from team Elo ratings, locking in results that have already
+        happened. Numbers shift as real matches land.
+      </div>
+
+      <div className="flex items-center gap-2 mb-4 flex-wrap">
+        <button
+          onClick={() => setSims((s) => (s === 10000 ? 40000 : 10000))}
+          disabled={computing}
+          className={
+            "px-3 py-1.5 rounded-lg text-xs font-bold border " +
+            (computing
+              ? "bg-stone-100 text-stone-400 border-stone-200"
+              : "bg-white text-emerald-800 border-stone-300 hover:border-emerald-600")
+          }
+        >
+          {sims === 10000 ? "Refine (40k sims)" : "Faster (10k sims)"}
+        </button>
+        {computing && (
+          <span className="text-xs text-stone-500 animate-pulse">
+            Simulating…
+          </span>
+        )}
+      </div>
+
+      {loadError && (
+        <div className="bg-amber-50 border border-amber-200 text-amber-800 text-sm rounded-lg px-4 py-3 mb-3">
+          {loadError}
+        </div>
+      )}
+
+      {proj && !proj.ok && (
+        <div className="bg-amber-50 border border-amber-200 text-amber-800 text-sm rounded-lg px-4 py-3 mb-3">
+          Not enough of the group draw is in the feed yet to project the bracket.
+          {proj.reason ? " " + proj.reason : ""}
+        </div>
+      )}
+
+      {proj && proj.ok && (
+        <>
+          {/* Championship race */}
+          <div className="bg-white border border-stone-200 rounded-xl p-4 mb-4">
+            <div className="flex items-baseline justify-between mb-2">
+              <Eyebrow>Title odds</Eyebrow>
+              <span className="text-xs text-stone-400">win % · proj pts</span>
+            </div>
+            {topChamp.map((t) => {
+              const w = maxChamp > 0 ? Math.round((t.champ / maxChamp) * 100) : 0;
+              return (
+                <div key={t.id} className="py-1.5">
+                  <div className="flex items-center justify-between gap-2 mb-1">
+                    <span className="flex items-center gap-1.5 text-sm text-stone-700 min-w-0">
+                      <Flag id={t.id} />
+                      <span className="truncate">{t.name}</span>
+                      <span className="font-mono text-[10px] text-stone-400 shrink-0">
+                        {t.elo}
+                        {t.eloDelta ? (
+                          <span
+                            className={
+                              t.eloDelta > 0 ? "text-emerald-600" : "text-red-500"
+                            }
+                          >
+                            {" "}
+                            {t.eloDelta > 0 ? "▲" : "▼"}
+                            {Math.abs(t.eloDelta)}
+                          </span>
+                        ) : null}
+                      </span>
+                    </span>
+                    <span className="text-xs font-mono text-stone-500 shrink-0">
+                      <span className="font-bold text-emerald-800">
+                        {pct(t.champ)}
+                      </span>
+                      {" · "}
+                      {t.projPts.toFixed(1)}
+                    </span>
+                  </div>
+                  <div className="h-2 rounded bg-stone-100 overflow-hidden">
+                    <div
+                      className="h-full rounded bg-emerald-600"
+                      style={{ width: w + "%" }}
+                    />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Pool forecast (entries) */}
+          {locked && poolRows.length > 0 && (
+            <div className="bg-white border border-stone-200 rounded-xl p-4 mb-4">
+              <div className="flex items-baseline justify-between mb-1">
+                <Eyebrow>Pool forecast</Eyebrow>
+                <span className="text-xs text-stone-400">win % · proj total</span>
+              </div>
+              <p className="text-xs text-stone-500 mb-3">
+                Projected final standings from each entry&apos;s teams. Win % is
+                how often that entry finishes first across the simulations (Golden
+                Boot bonus not modeled).
+              </p>
+              {poolRows.map((e, i) => (
+                <div
+                  key={e.name + i}
+                  className="flex items-center justify-between gap-3 py-1.5 border-b border-stone-100 last:border-0"
+                >
+                  <span className="flex items-center gap-2 min-w-0">
+                    <span className="w-5 text-center font-mono text-xs text-stone-400 shrink-0">
+                      {i + 1}
+                    </span>
+                    <span className="text-sm font-semibold text-stone-800 truncate">
+                      {e.name}
+                    </span>
+                  </span>
+                  <span className="flex items-center gap-3 shrink-0 font-mono text-xs">
+                    <span className="text-stone-400">
+                      now {e.now}
+                    </span>
+                    <span className="text-stone-500">
+                      proj{" "}
+                      <span className="font-bold text-stone-700">
+                        {e.projTotal.toFixed(0)}
+                      </span>
+                    </span>
+                    <span className="w-12 text-right font-bold text-emerald-800">
+                      {pct(e.winProb)}
+                    </span>
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Projected group tables */}
+          {proj.groups && proj.groups.length > 0 && (
+            <div className="mb-4">
+              <div className="flex items-baseline justify-between mb-2">
+                <Eyebrow>Projected group tables</Eyebrow>
+                <span className="text-xs text-stone-400">finish 1–4 · advance</span>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-3">
+                {proj.groups.map((g) => (
+                  <ProjGroupTable key={g.group} g={g} />
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Full team table */}
+          <div className="bg-white border border-stone-200 rounded-xl p-4">
+            <div className="flex items-center justify-between mb-2 gap-2">
+              <Eyebrow>Team projections</Eyebrow>
+              <div className="inline-flex rounded-lg border border-stone-300 overflow-hidden">
+                {[
+                  ["pts", "Proj pts"],
+                  ["champ", "Title odds"],
+                ].map(([val, label]) => (
+                  <button
+                    key={val}
+                    onClick={() => setSortBy(val)}
+                    className={
+                      "px-2.5 py-1 text-xs font-bold " +
+                      (sortBy === val
+                        ? "bg-emerald-800 text-white"
+                        : "bg-white text-stone-600 hover:bg-stone-100")
+                    }
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-[11px] text-stone-400">
+                  <th className="text-left font-medium py-1">Team</th>
+                  <th className="w-10 text-center font-medium" title="Reach knockout (R32)">KO</th>
+                  <th className="w-10 text-center font-medium" title="Reach quarterfinal">QF</th>
+                  <th className="w-10 text-center font-medium" title="Reach semifinal">SF</th>
+                  <th className="w-10 text-center font-medium" title="Win the cup">Win</th>
+                  <th className="w-12 text-center font-medium">Proj</th>
+                </tr>
+              </thead>
+              <tbody>
+                {teamRows.map((t) => (
+                  <tr key={t.id} className="border-t border-stone-100">
+                    <td className="py-1 text-stone-700">
+                      <span className="font-mono text-[11px] text-stone-400 mr-1">
+                        T{t.tier}
+                      </span>
+                      <Flag id={t.id} className="mr-1.5 align-[-2px]" />
+                      {t.name}
+                    </td>
+                    <td className="text-center text-stone-500 font-mono text-xs">
+                      {pct(t.advance)}
+                    </td>
+                    <td className="text-center text-stone-500 font-mono text-xs">
+                      {pct(t.qf)}
+                    </td>
+                    <td className="text-center text-stone-500 font-mono text-xs">
+                      {pct(t.sf)}
+                    </td>
+                    <td className="text-center font-mono text-xs font-bold text-emerald-800">
+                      {pct(t.champ)}
+                    </td>
+                    <td className="text-center font-mono text-sm font-bold text-stone-700">
+                      {t.projPts.toFixed(1)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <p className="text-xs text-stone-400 mt-3">
+              Ratings start from an Elo snapshot (≈14 Jun 2026) and update after
+              every completed match (K=60), so the ▲▼ shows form swing during the
+              tournament. Knockout matchups use the official 2026 bracket;
+              third-place routing is approximated. Projected points use the
+              pool&apos;s scoring, excluding the Golden Boot bonus.
+            </p>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 // ---------- Results (live feed) ----------
 
 function MatchRow({ m }) {
@@ -2329,6 +2764,7 @@ export default function WorldCupTierPool() {
     ? [
         ["results", "Results"],
         ["board", "Leaderboard"],
+        ["forecast", "Projections"],
         ["analysis", "Analysis"],
         ["rules", "Rules"],
         ["admin", "Commissioner"],
@@ -2338,6 +2774,7 @@ export default function WorldCupTierPool() {
         ["picks", "Make Picks"],
         ["board", "Leaderboard"],
         ["analysis", "Analysis"],
+        ["forecast", "Projections"],
         ["results", "Results"],
         ["rules", "Rules"],
         ["admin", "Commissioner"],
@@ -2413,6 +2850,8 @@ export default function WorldCupTierPool() {
           <ResultsView live={live} />
         ) : activeTab === "analysis" ? (
           <AnalysisView locked={locked} results={results} />
+        ) : activeTab === "forecast" ? (
+          <ForecastView live={live} locked={locked} results={results} />
         ) : activeTab === "rules" ? (
           <RulesView />
         ) : (
