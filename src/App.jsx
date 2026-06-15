@@ -1620,6 +1620,7 @@ function ForecastView({ live, locked, results }) {
   const [computing, setComputing] = useState(false);
   const [sims, setSims] = useState(10000);
   const [sortBy, setSortBy] = useState("pts"); // "pts" | "champ"
+  const [expanded, setExpanded] = useState(null); // expanded pool-entry name
 
   const loadEntries = async () => {
     setLoadError("");
@@ -1698,10 +1699,9 @@ function ForecastView({ live, locked, results }) {
     return (proj.entries || [])
       .map((e, i) => {
         const src = entries[i];
-        const now = src
-          ? entryTeamIds(src).reduce((s, id) => s + teamPoints(results[id]), 0)
-          : 0;
-        return { ...e, now };
+        const ids = src ? entryTeamIds(src) : [];
+        const now = ids.reduce((s, id) => s + teamPoints(results[id]), 0);
+        return { ...e, now, ids };
       })
       .sort((a, b) => b.winProb - a.winProb || b.projTotal - a.projTotal);
   }, [proj, entries, results]);
@@ -1832,37 +1832,89 @@ function ForecastView({ live, locked, results }) {
               <p className="text-xs text-stone-500 mb-3">
                 Projected final standings from each entry&apos;s teams. Win % is
                 how often that entry finishes first across the simulations (Golden
-                Boot bonus not modeled).
+                Boot bonus not modeled). Tap an entry to see each team&apos;s
+                projected points.
               </p>
-              {poolRows.map((e, i) => (
-                <div
-                  key={e.name + i}
-                  className="flex items-center justify-between gap-3 py-1.5 border-b border-stone-100 last:border-0"
-                >
-                  <span className="flex items-center gap-2 min-w-0">
-                    <span className="w-5 text-center font-mono text-xs text-stone-400 shrink-0">
-                      {i + 1}
-                    </span>
-                    <span className="text-sm font-semibold text-stone-800 truncate">
-                      {e.name}
-                    </span>
-                  </span>
-                  <span className="flex items-center gap-3 shrink-0 font-mono text-xs">
-                    <span className="text-stone-400">
-                      now {e.now}
-                    </span>
-                    <span className="text-stone-500">
-                      proj{" "}
-                      <span className="font-bold text-stone-700">
-                        {e.projTotal.toFixed(0)}
+              {poolRows.map((e, i) => {
+                const isOpen = expanded === e.name;
+                const teams = e.ids
+                  .map((id) => ({
+                    id,
+                    name: ALL_TEAMS[id] ? ALL_TEAMS[id].name : id,
+                    tier: ALL_TEAMS[id] ? ALL_TEAMS[id].tier : "?",
+                    proj: proj.teams[id] ? proj.teams[id].projPts : 0,
+                    now: teamPoints(results[id]),
+                  }))
+                  .sort((a, b) => b.proj - a.proj);
+                return (
+                  <div
+                    key={e.name + i}
+                    className="border-b border-stone-100 last:border-0"
+                  >
+                    <button
+                      onClick={() => setExpanded(isOpen ? null : e.name)}
+                      className="w-full flex items-center justify-between gap-3 py-1.5 text-left"
+                    >
+                      <span className="flex items-center gap-2 min-w-0">
+                        <span className="w-5 text-center font-mono text-xs text-stone-400 shrink-0">
+                          {i + 1}
+                        </span>
+                        <span className="text-sm font-semibold text-stone-800 truncate">
+                          {e.name}
+                        </span>
+                        <span className="text-stone-300 text-[10px] shrink-0">
+                          {isOpen ? "▼" : "▶"}
+                        </span>
                       </span>
-                    </span>
-                    <span className="w-12 text-right font-bold text-emerald-800">
-                      {pct(e.winProb)}
-                    </span>
-                  </span>
-                </div>
-              ))}
+                      <span className="flex items-center gap-3 shrink-0 font-mono text-xs">
+                        <span className="text-stone-400">now {e.now}</span>
+                        <span className="text-stone-500">
+                          proj{" "}
+                          <span className="font-bold text-stone-700">
+                            {e.projTotal.toFixed(0)}
+                          </span>
+                        </span>
+                        <span className="w-12 text-right font-bold text-emerald-800">
+                          {pct(e.winProb)}
+                        </span>
+                      </span>
+                    </button>
+                    {isOpen && (
+                      <div className="pl-7 pr-1 pb-2">
+                        {teams.map((t) => (
+                          <div
+                            key={t.id}
+                            className="flex items-center justify-between py-1"
+                          >
+                            <span className="flex items-center gap-1.5 text-sm text-stone-700 min-w-0">
+                              <span className="font-mono text-[11px] text-stone-400">
+                                T{t.tier}
+                              </span>
+                              <Flag id={t.id} />
+                              <span className="truncate">{t.name}</span>
+                            </span>
+                            <span className="font-mono text-xs shrink-0">
+                              <span className="text-stone-400">now {t.now}</span>
+                              {" · "}
+                              <span className="font-bold text-emerald-800">
+                                {t.proj.toFixed(1)}
+                              </span>
+                            </span>
+                          </div>
+                        ))}
+                        <div className="flex items-center justify-between py-1 mt-1 border-t border-stone-100">
+                          <span className="text-xs text-stone-400">
+                            Projected total
+                          </span>
+                          <span className="font-mono text-xs font-bold text-stone-700">
+                            {e.projTotal.toFixed(1)}
+                          </span>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           )}
 
