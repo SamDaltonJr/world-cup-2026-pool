@@ -200,6 +200,23 @@ function teamPoints(r) {
   return pts;
 }
 
+// Whether two per-team results are scoring-equivalent (same group W/D, finish,
+// and knockout wins). The commissioner form uses this to flag teams whose
+// scoring changed versus what's saved after a feed sync, before committing.
+function sameResult(a, b) {
+  a = a || blankResult();
+  b = b || blankResult();
+  if (
+    (a.gw || 0) !== (b.gw || 0) ||
+    (a.gd || 0) !== (b.gd || 0) ||
+    (a.finish || "") !== (b.finish || "")
+  )
+    return false;
+  return KO_STAGES.every(
+    (s) => !!(a.ko && a.ko[s.key]) === !!(b.ko && b.ko[s.key])
+  );
+}
+
 // How many games a team has actually played and the most pool points those
 // played games could have yielded — the team's "ceiling so far". Derived from
 // the live feed (group standings + finished knockout matches) so it always
@@ -1248,6 +1265,43 @@ function AnalysisView({ locked, results }) {
     [tierCounts, results]
   );
 
+  // Lineup uniqueness: how contrarian each entry is versus the field. Every
+  // entry has the same tier shape (one pick per tier slot), so comparing the
+  // average rarity of their teams is apples-to-apples. "Signature" picks are an
+  // entry's lowest-owned teams — the ones that set it apart; "off-chalk" counts
+  // how many of its picks differ from the consensus (most-picked) lineup.
+  const uniqueness = useMemo(() => {
+    if (!entries || !entries.length || !total) return [];
+    const countOf = (id) => {
+      const tier = ALL_TEAMS[id] ? ALL_TEAMS[id].tier : null;
+      return tier && tierCounts[tier] ? tierCounts[tier][id] || 0 : 0;
+    };
+    const consensusSet = new Set(consensusLineup.picks.map((p) => p.id));
+    return entries
+      .map((e) => {
+        const teams = entryTeamIds(e).map((id) => {
+          const count = countOf(id);
+          return {
+            id,
+            name: ALL_TEAMS[id] ? ALL_TEAMS[id].name : id,
+            tier: ALL_TEAMS[id] ? ALL_TEAMS[id].tier : "?",
+            count,
+            own: count / total, // ownership fraction across the field
+          };
+        });
+        const score = teams.length
+          ? teams.reduce((s, t) => s + (1 - t.own), 0) / teams.length
+          : 0;
+        const offChalk = teams.filter((t) => !consensusSet.has(t.id)).length;
+        const solo = teams.filter((t) => t.count === 1).length;
+        const signature = [...teams]
+          .sort((a, b) => a.count - b.count || a.name.localeCompare(b.name))
+          .slice(0, 3);
+        return { name: e.name, score, offChalk, solo, signature };
+      })
+      .sort((a, b) => b.score - a.score || b.offChalk - a.offChalk);
+  }, [entries, total, tierCounts, consensusLineup]);
+
   // Each entry's team-point total (no Golden Boot bonus), high to low, so the
   // benchmark lineups can be slotted against the real field.
   const entryTotals = useMemo(
@@ -1445,6 +1499,59 @@ function AnalysisView({ locked, results }) {
           </div>
         </div>
       ))}
+
+      {uniqueness.length > 0 && (
+        <div className="bg-white border border-stone-200 rounded-xl p-4 mb-4">
+          <div className="flex items-baseline justify-between mb-1">
+            <Eyebrow>Lineup uniqueness</Eyebrow>
+            <span className="text-xs text-stone-400">most contrarian → chalk</span>
+          </div>
+          <p className="text-xs text-stone-500 mb-3">
+            How much each lineup differs from the field. Signature picks are an
+            entry&apos;s lowest-owned teams — the ones that set it apart; ★ marks a
+            team only that entry has. Off-chalk counts how many of its picks differ
+            from the consensus lineup.
+          </p>
+          {uniqueness.map((u, i) => (
+            <div
+              key={u.name + i}
+              className="py-2 border-b border-stone-100 last:border-0"
+            >
+              <div className="flex items-center justify-between gap-2 mb-1.5">
+                <span className="flex items-center gap-2 min-w-0">
+                  <span className="w-5 text-center font-mono text-xs text-stone-400 shrink-0">
+                    {i + 1}
+                  </span>
+                  <span className="text-sm font-semibold text-stone-800 truncate">
+                    {u.name}
+                  </span>
+                </span>
+                <span className="text-xs font-mono text-stone-500 shrink-0">
+                  {u.offChalk}/{TIERS.reduce((s, t) => s + t.pickCount, 0)}{" "}
+                  off-chalk{u.solo ? ` · ${u.solo}★` : ""}
+                </span>
+              </div>
+              <div className="flex flex-wrap gap-1.5 pl-7">
+                {u.signature.map((t) => (
+                  <span
+                    key={t.id}
+                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg border border-stone-200 bg-stone-50 text-xs"
+                  >
+                    <span className="font-mono text-[10px] text-stone-400">
+                      T{t.tier}
+                    </span>
+                    <Flag id={t.id} />
+                    <span className="font-semibold text-stone-700">{t.name}</span>
+                    <span className="font-mono text-stone-400">
+                      {Math.round(t.own * 100)}%{t.count === 1 ? " ★" : ""}
+                    </span>
+                  </span>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
 
       {TIERS.map((tier) => {
         const rows = tier.teams
@@ -1706,6 +1813,36 @@ function ForecastView({ live, locked, results }) {
       .sort((a, b) => b.winProb - a.winProb || b.projTotal - a.projTotal);
   }, [proj, entries, results]);
 
+  // Field ownership (how many entries hold each team) and the consensus lineup
+  // (most-picked team[s] per tier), for the per-entry "differentiators" shown
+  // when an entry is expanded — mirrors the Analysis tab's uniqueness view.
+  const fieldOwn = useMemo(() => {
+    const m = {};
+    (entries || []).forEach((e) =>
+      entryTeamIds(e).forEach((id) => (m[id] = (m[id] || 0) + 1))
+    );
+    return m;
+  }, [entries]);
+
+  const consensusSet = useMemo(() => {
+    const set = new Set();
+    if (!entries || !entries.length) return set;
+    TIERS.forEach((t) => {
+      const counts = {};
+      entries.forEach((e) => {
+        const v = e.picks ? e.picks[t.n] : null;
+        const ids = Array.isArray(v) ? v : v ? [v] : [];
+        ids.forEach((id) => (counts[id] = (counts[id] || 0) + 1));
+      });
+      t.teams
+        .map((tm) => ({ id: tm.id, c: counts[tm.id] || 0 }))
+        .sort((a, b) => b.c - a.c)
+        .slice(0, t.pickCount)
+        .forEach((x) => set.add(x.id));
+    });
+    return set;
+  }, [entries]);
+
   if (!live) {
     return (
       <div className="bg-white border border-stone-200 rounded-xl p-6 text-center">
@@ -1847,6 +1984,24 @@ function ForecastView({ live, locked, results }) {
                     max: teamCeiling(id, live).max, // most those games could yield
                   }))
                   .sort((a, b) => b.proj - a.proj);
+                // Differentiators: how this lineup separates from the field.
+                const totalEntries = entries ? entries.length : 0;
+                const offChalk = e.ids.filter(
+                  (id) => !consensusSet.has(id)
+                ).length;
+                const soloCount = e.ids.filter(
+                  (id) => (fieldOwn[id] || 0) === 1
+                ).length;
+                const signature = e.ids
+                  .map((id) => ({
+                    id,
+                    name: ALL_TEAMS[id] ? ALL_TEAMS[id].name : id,
+                    tier: ALL_TEAMS[id] ? ALL_TEAMS[id].tier : "?",
+                    count: fieldOwn[id] || 0,
+                    frac: totalEntries ? (fieldOwn[id] || 0) / totalEntries : 0,
+                  }))
+                  .sort((a, b) => a.count - b.count || a.name.localeCompare(b.name))
+                  .slice(0, 3);
                 return (
                   <div
                     key={e.name + i}
@@ -1912,6 +2067,37 @@ function ForecastView({ live, locked, results }) {
                           <span className="font-mono text-xs font-bold text-stone-700">
                             {e.projTotal.toFixed(1)}
                           </span>
+                        </div>
+                        <div className="mt-2 pt-2 border-t border-stone-100">
+                          <div className="flex items-center justify-between mb-1.5">
+                            <span className="text-[11px] font-bold uppercase tracking-wide text-stone-400">
+                              Differentiators
+                            </span>
+                            <span className="text-xs font-mono text-stone-400">
+                              {offChalk}/{e.ids.length} off-chalk
+                              {soloCount ? ` · ${soloCount}★` : ""}
+                            </span>
+                          </div>
+                          <div className="flex flex-wrap gap-1.5">
+                            {signature.map((t) => (
+                              <span
+                                key={t.id}
+                                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg border border-stone-200 bg-stone-50 text-xs"
+                              >
+                                <span className="font-mono text-[10px] text-stone-400">
+                                  T{t.tier}
+                                </span>
+                                <Flag id={t.id} />
+                                <span className="font-semibold text-stone-700">
+                                  {t.name}
+                                </span>
+                                <span className="font-mono text-stone-400">
+                                  {Math.round(t.frac * 100)}%
+                                  {t.count === 1 ? " ★" : ""}
+                                </span>
+                              </span>
+                            ))}
+                          </div>
                         </div>
                       </div>
                     )}
@@ -2475,9 +2661,17 @@ function AdminView({ results, setResults, settings, setSettings, live }) {
 
   const syncFromApi = () => {
     if (!live) return;
-    setDraft((d) => deriveResults(live, d));
+    const next = deriveResults(live, draft);
+    setDraft(next);
+    const changed = Object.keys(ALL_TEAMS).filter(
+      (id) => !sameResult(next[id], results[id])
+    ).length;
     setSaveMsg(
-      "Pulled the live feed into the form below — review every team, then Save results."
+      changed > 0
+        ? `Pulled the live feed — ${changed} team${
+            changed === 1 ? "" : "s"
+          } changed vs saved (highlighted below). Review, then Save results.`
+        : "Pulled the live feed — no changes vs the saved results."
     );
   };
 
@@ -2674,6 +2868,7 @@ function AdminView({ results, setResults, settings, setSettings, live }) {
           </div>
           {tier.teams.map((tm) => {
             const r = draft[tm.id];
+            const changed = !sameResult(r, results[tm.id]);
             const advanced =
               r.finish === "winner" ||
               r.finish === "runnerup" ||
@@ -2682,7 +2877,12 @@ function AdminView({ results, setResults, settings, setSettings, live }) {
             return (
               <div
                 key={tm.id}
-                className="bg-white border border-stone-200 rounded-xl p-3 mb-2"
+                className={
+                  "rounded-xl p-3 mb-2 border " +
+                  (changed
+                    ? "border-amber-400 bg-amber-50"
+                    : "border-stone-200 bg-white")
+                }
               >
                 <div className="flex items-center justify-between flex-wrap gap-2">
                   <span className="font-semibold text-sm text-stone-800 w-36 flex items-center gap-1.5">
@@ -2709,6 +2909,11 @@ function AdminView({ results, setResults, settings, setSettings, live }) {
                         </option>
                       ))}
                     </select>
+                    {changed && (
+                      <span className="font-mono text-[10px] text-amber-700 whitespace-nowrap">
+                        was {teamPoints(results[tm.id])}
+                      </span>
+                    )}
                     <span className="font-mono text-sm font-bold text-emerald-800 w-8 text-right">
                       {teamPoints(r)}
                     </span>
