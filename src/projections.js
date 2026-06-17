@@ -261,6 +261,44 @@ const THIRD_SLOTS = R32.filter((x) => x.b.t === "3").map((x) => ({
   from: new Set(x.b.from),
 }));
 
+// Which two earlier matches feed each later match (plus the final). Used both to
+// order the bracket for display and to walk the tree top-to-bottom.
+const FEEDERS = { 104: [101, 102] };
+["sf", "qf", "r16"].forEach((round) =>
+  LATER_ROUNDS[round].forEach((mt) => (FEEDERS[mt.m] = [mt.a, mt.b]))
+);
+
+// Top-to-bottom display order for a left-aligned bracket: an in-order walk of the
+// binary tree from the final down to the Round-of-32 leaves. Each round is then
+// ordered by the position of its subtree's first leaf, so columns line up.
+const BRACKET_ORDER = (() => {
+  const leaves = [];
+  const inorder = (m) => {
+    const f = FEEDERS[m];
+    if (!f) return leaves.push(m);
+    inorder(f[0]);
+    inorder(f[1]);
+  };
+  inorder(104);
+  const leafIndex = {};
+  leaves.forEach((m, i) => (leafIndex[m] = i));
+  const firstLeaf = (m) =>
+    FEEDERS[m] ? firstLeaf(FEEDERS[m][0]) : leafIndex[m];
+  const byLeaf = (a, b) => firstLeaf(a) - firstLeaf(b);
+  return {
+    r32: leaves,
+    r16: LATER_ROUNDS.r16.map((x) => x.m).sort(byLeaf),
+    qf: LATER_ROUNDS.qf.map((x) => x.m).sort(byLeaf),
+    sf: LATER_ROUNDS.sf.map((x) => x.m).sort(byLeaf),
+  };
+})();
+
+// A short label for a Round-of-32 seat before any team has filled it: group
+// winner "1A", runner-up "2B", or a third-place qualifier "3rd".
+function slotLabel(s) {
+  return s.t === "W" ? "1" + s.g : s.t === "R" ? "2" + s.g : "3rd";
+}
+
 // Assign each qualifying third-place group to a distinct third slot whose
 // cluster allows it (a perfect bipartite matching, always solvable for the 495
 // valid combinations). Returns { [matchNumber]: groupLetter }. Groups are tried
@@ -360,9 +398,20 @@ function koDecide(elo, idA, idB, koResults) {
 // ---------- One full simulation ----------
 // Mutates the per-team `res` shape ({ gw, gd, finish, ko }) for scoring and
 // returns nothing else; callers score and aggregate from `res`.
-function simulateOnce(elo, groups, koResults, teamIds) {
+function simulateOnce(elo, groups, koResults, teamIds, bracketAcc) {
   const res = {};
   teamIds.forEach((id) => (res[id] = { gw: 0, gd: 0, finish: "out", ko: {} }));
+
+  // Optionally tally, per knockout match, which team filled each seat and who
+  // advanced — accumulated across sims into per-slot occupancy probabilities.
+  const rec = bracketAcc
+    ? (m, a, b, w) => {
+        const e = bracketAcc[m] || (bracketAcc[m] = { a: {}, b: {}, w: {} });
+        e.a[a] = (e.a[a] || 0) + 1;
+        e.b[b] = (e.b[b] || 0) + 1;
+        e.w[w] = (e.w[w] || 0) + 1;
+      }
+    : null;
 
   // --- Group stage ---
   const groupRank = {}; // letter -> [{id, pts, gd, gf}] sorted best-first
@@ -441,6 +490,7 @@ function simulateOnce(elo, groups, koResults, teamIds) {
     const w = koDecide(elo, teamA, teamB, koResults);
     winners[mt.m] = w;
     res[w].ko.r32 = true;
+    if (rec) rec(mt.m, teamA, teamB, w);
   });
 
   ["r16", "qf", "sf"].forEach((round) => {
@@ -450,6 +500,7 @@ function simulateOnce(elo, groups, koResults, teamIds) {
       const w = koDecide(elo, teamA, teamB, koResults);
       winners[mt.m] = w;
       res[w].ko[koPoint[round]] = true;
+      if (rec) rec(mt.m, teamA, teamB, w);
     });
   });
 
@@ -465,9 +516,11 @@ function simulateOnce(elo, groups, koResults, teamIds) {
   });
   const tpWin = koDecide(elo, sfPairs[0].loser, sfPairs[1].loser, koResults);
   res[tpWin].ko.tp = true;
+  if (rec) rec(103, sfPairs[0].loser, sfPairs[1].loser, tpWin);
 
   const champ = koDecide(elo, winners[101], winners[102], koResults);
   res[champ].ko.f = true;
+  if (rec) rec(104, winners[101], winners[102], champ);
 
   return res;
 }
@@ -565,9 +618,11 @@ export function projectTournament(opts) {
   );
   // Per-entry accumulators.
   const eAcc = entries.map(() => ({ totalSum: 0, wins: 0 }));
+  // Per-knockout-slot occupancy, filled by simulateOnce each run.
+  const bracketAcc = {};
 
   for (let s = 0; s < sims; s++) {
-    const res = simulateOnce(elo, groups, koResults, teamIds);
+    const res = simulateOnce(elo, groups, koResults, teamIds, bracketAcc);
     const ptsByTeam = {};
     teamIds.forEach((id) => {
       const r = res[id];
@@ -649,6 +704,44 @@ export function projectTournament(opts) {
     winProb: eAcc[i].wins / sims,
   }));
 
+  // The projected bracket: for each knockout match, the two most-likely teams to
+  // fill its seats (with their probability of reaching that seat) and the most-
+  // likely team to advance from it. Drawn left-to-right, R32 → Final.
+  const topTwo = (counter) => {
+    let i1 = null, c1 = -1, i2 = null, c2 = -1;
+    for (const k in counter) {
+      const v = counter[k];
+      if (v > c1) { i2 = i1; c2 = c1; i1 = k; c1 = v; }
+      else if (v > c2) { i2 = k; c2 = v; }
+    }
+    return {
+      id: i1,
+      p: c1 <= 0 ? 0 : c1 / sims,
+      alt: i2 ? { id: i2, p: c2 / sims } : null,
+    };
+  };
+  const mkMatch = (m, extra) => {
+    const e = bracketAcc[m] || { a: {}, b: {}, w: {} };
+    return {
+      m,
+      seatA: topTwo(e.a),
+      seatB: topTwo(e.b),
+      winner: topTwo(e.w),
+      ...extra,
+    };
+  };
+  const bracket = {
+    r32: BRACKET_ORDER.r32.map((m) => {
+      const def = R32.find((x) => x.m === m);
+      return mkMatch(m, { slotA: slotLabel(def.a), slotB: slotLabel(def.b) });
+    }),
+    r16: BRACKET_ORDER.r16.map((m) => mkMatch(m)),
+    qf: BRACKET_ORDER.qf.map((m) => mkMatch(m)),
+    sf: BRACKET_ORDER.sf.map((m) => mkMatch(m)),
+    final: mkMatch(104),
+    third: mkMatch(103),
+  };
+
   return {
     ok: true,
     sims,
@@ -657,5 +750,6 @@ export function projectTournament(opts) {
     groups: groupTables,
     predictions,
     liveGames,
+    bracket,
   };
 }

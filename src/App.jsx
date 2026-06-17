@@ -1876,6 +1876,127 @@ function ProjGroupTable({ g }) {
   );
 }
 
+// One team in a bracket slot: flag + code, with its probability of reaching the
+// slot. The model's predicted advancer is bold on an emerald tint.
+function BracketSeat({ seat, isWinner }) {
+  const name = seat.id && ALL_TEAMS[seat.id] ? ALL_TEAMS[seat.id].name : "";
+  return (
+    <div
+      className={
+        "flex items-center justify-between gap-1 px-1.5 py-1 " +
+        (isWinner ? "bg-emerald-50" : "")
+      }
+    >
+      <span className="flex items-center gap-1 min-w-0">
+        <Flag id={seat.id} />
+        <span
+          title={name}
+          className={
+            "text-[11px] leading-none truncate " +
+            (isWinner ? "font-bold text-stone-800" : "text-stone-500")
+          }
+        >
+          {seat.id || "—"}
+        </span>
+      </span>
+      <span className="text-[10px] font-mono text-stone-400 shrink-0">
+        {pct(seat.p)}
+      </span>
+    </div>
+  );
+}
+
+// One bracket box: two seats stacked, winner highlighted.
+function BracketMatch({ match }) {
+  const aw = match.winner.id && match.seatA.id === match.winner.id;
+  const bw = match.winner.id && match.seatB.id === match.winner.id;
+  return (
+    <div className="border border-stone-200 rounded-md overflow-hidden bg-white w-[116px] shrink-0">
+      <BracketSeat seat={match.seatA} isWinner={aw} />
+      <div className="border-t border-stone-100" />
+      <BracketSeat seat={match.seatB} isWinner={bw} />
+    </div>
+  );
+}
+
+// A bracket round as a vertical column; boxes spread to line up with their
+// feeders in the previous round.
+function BracketColumn({ title, children }) {
+  return (
+    <div className="flex flex-col shrink-0">
+      <div className="h-3 mb-2 text-[10px] font-bold uppercase tracking-wider text-stone-400 text-center">
+        {title}
+      </div>
+      <div className="flex flex-col justify-around grow gap-2">{children}</div>
+    </div>
+  );
+}
+
+// The projected bracket: most-likely team in each knockout slot, left-to-right
+// from the Round of 32 to the final, with reach probabilities.
+function BracketView({ bracket }) {
+  if (!bracket) return null;
+  const champ = bracket.final.winner;
+  const third = bracket.third.winner;
+  const teamName = (id) => (ALL_TEAMS[id] ? ALL_TEAMS[id].name : id);
+  return (
+    <div className="bg-white border border-stone-200 rounded-xl p-4 mb-4">
+      <div className="flex items-baseline justify-between mb-1">
+        <Eyebrow>Projected bracket</Eyebrow>
+        <span className="text-xs text-stone-400">% = chance to reach</span>
+      </div>
+      <p className="text-xs text-stone-500 mb-3">
+        The most likely team to fill each slot, from the same simulations. The
+        bold side is the model&apos;s pick to advance; the percentage is how often
+        that team reaches that round. Scroll sideways to follow the path to the
+        final.
+      </p>
+      <div className="overflow-x-auto -mx-1 px-1 pb-1">
+        <div className="flex gap-3 items-stretch min-w-max">
+          <BracketColumn title="Round of 32">
+            {bracket.r32.map((m) => (
+              <BracketMatch key={m.m} match={m} />
+            ))}
+          </BracketColumn>
+          <BracketColumn title="Round of 16">
+            {bracket.r16.map((m) => (
+              <BracketMatch key={m.m} match={m} />
+            ))}
+          </BracketColumn>
+          <BracketColumn title="Quarterfinals">
+            {bracket.qf.map((m) => (
+              <BracketMatch key={m.m} match={m} />
+            ))}
+          </BracketColumn>
+          <BracketColumn title="Semifinals">
+            {bracket.sf.map((m) => (
+              <BracketMatch key={m.m} match={m} />
+            ))}
+          </BracketColumn>
+          <BracketColumn title="Final">
+            <BracketMatch match={bracket.final} />
+          </BracketColumn>
+        </div>
+      </div>
+      {champ.id && (
+        <div className="mt-3 flex items-center gap-2 text-sm flex-wrap">
+          <span className="text-xs font-bold uppercase tracking-wider text-amber-600">
+            Projected champion
+          </span>
+          <Flag id={champ.id} />
+          <span className="font-bold text-stone-800">{teamName(champ.id)}</span>
+          <span className="text-xs font-mono text-stone-400">{pct(champ.p)}</span>
+          {third.id && (
+            <span className="text-xs text-stone-400">
+              · 3rd place {teamName(third.id)}
+            </span>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ForecastView({ live, locked, results }) {
   const [entries, setEntries] = useState(null);
   const [loadError, setLoadError] = useState("");
@@ -1885,6 +2006,7 @@ function ForecastView({ live, locked, results }) {
   const [sortBy, setSortBy] = useState("pts"); // "pts" | "champ"
   const [expanded, setExpanded] = useState(null); // expanded pool-entry name
   const [showAllMatches, setShowAllMatches] = useState(false);
+  const [view, setView] = useState("cup"); // "cup" (tournament) | "pool"
 
   const loadEntries = async () => {
     setLoadError("");
@@ -2089,7 +2211,30 @@ function ForecastView({ live, locked, results }) {
 
       {proj && proj.ok && (
         <>
+          {/* Split the tab between the tournament forecast and our pool's outlook
+              so neither view gets too long. */}
+          <div className="inline-flex rounded-lg border border-stone-300 bg-white p-0.5 mb-4 text-xs font-bold">
+            {[
+              ["cup", "World Cup"],
+              ["pool", "Our Pool"],
+            ].map(([val, label]) => (
+              <button
+                key={val}
+                onClick={() => setView(val)}
+                className={
+                  "px-3 py-1.5 rounded-md " +
+                  (view === val
+                    ? "bg-emerald-800 text-white"
+                    : "text-stone-600 hover:bg-stone-100")
+                }
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+
           {/* Championship race */}
+          {view === "cup" && (
           <div className="bg-white border border-stone-200 rounded-xl p-4 mb-4">
             <div className="flex items-baseline justify-between mb-2">
               <Eyebrow>Title odds</Eyebrow>
@@ -2136,9 +2281,13 @@ function ForecastView({ live, locked, results }) {
               );
             })}
           </div>
+          )}
+
+          {/* Projected bracket */}
+          {view === "cup" && <BracketView bracket={proj.bracket} />}
 
           {/* Live games */}
-          {proj.liveGames && proj.liveGames.length > 0 && (
+          {view === "cup" && proj.liveGames && proj.liveGames.length > 0 && (
             <div className="bg-white border border-stone-200 rounded-xl p-4 mb-4">
               <div className="flex items-baseline justify-between mb-1">
                 <span className="inline-flex items-center gap-1.5">
@@ -2157,7 +2306,7 @@ function ForecastView({ live, locked, results }) {
           )}
 
           {/* Upcoming match predictions */}
-          {proj.predictions && proj.predictions.length > 0 && (
+          {view === "cup" && proj.predictions && proj.predictions.length > 0 && (
             <div className="bg-white border border-stone-200 rounded-xl p-4 mb-4">
               <div className="flex items-baseline justify-between mb-1">
                 <Eyebrow>Upcoming match predictions</Eyebrow>
@@ -2187,7 +2336,7 @@ function ForecastView({ live, locked, results }) {
           )}
 
           {/* Pool forecast (entries) */}
-          {locked && poolRows.length > 0 && (
+          {view === "pool" && locked && poolRows.length > 0 && (
             <div className="bg-white border border-stone-200 rounded-xl p-4 mb-4">
               <div className="flex items-baseline justify-between mb-1">
                 <Eyebrow>Pool forecast</Eyebrow>
@@ -2335,7 +2484,7 @@ function ForecastView({ live, locked, results }) {
           )}
 
           {/* Projected group tables */}
-          {proj.groups && proj.groups.length > 0 && (
+          {view === "cup" && proj.groups && proj.groups.length > 0 && (
             <div className="mb-4">
               <div className="flex items-baseline justify-between mb-2">
                 <Eyebrow>Projected group tables</Eyebrow>
@@ -2350,7 +2499,7 @@ function ForecastView({ live, locked, results }) {
           )}
 
           {/* Highest projected lineup (optimal by forecast points) */}
-          {projOptimal && (
+          {view === "pool" && projOptimal && (
             <div className="bg-white border border-stone-200 rounded-xl p-4 mb-4">
               <div className="flex items-baseline justify-between mb-1">
                 <Eyebrow>Highest projected lineup</Eyebrow>
@@ -2388,6 +2537,7 @@ function ForecastView({ live, locked, results }) {
           )}
 
           {/* Full team table */}
+          {view === "cup" && (
           <div className="bg-white border border-stone-200 rounded-xl p-4">
             <div className="flex items-center justify-between mb-2 gap-2">
               <Eyebrow>Team projections</Eyebrow>
@@ -2459,6 +2609,16 @@ function ForecastView({ live, locked, results }) {
               pool&apos;s scoring, excluding the Golden Boot bonus.
             </p>
           </div>
+          )}
+
+          {/* Pool view before entries lock: nothing to project yet. */}
+          {view === "pool" && !locked && (
+            <div className="bg-white border border-stone-200 rounded-xl p-4 text-sm text-stone-500">
+              Pool projections appear once entries lock. Until then, the Highest
+              projected lineup above shows the most a valid lineup could score from
+              here.
+            </div>
+          )}
         </>
       )}
     </div>
