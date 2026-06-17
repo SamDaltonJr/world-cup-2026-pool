@@ -106,12 +106,30 @@ function poisson(lambda) {
 
 // Simulate a group match, returning [homeGoals, awayGoals]. The Elo gap sets the
 // expected supremacy; each side's goals are an independent Poisson draw.
+function groupLambdas(elo, idH, idA) {
+  const sup = (adjElo(elo, idH) - adjElo(elo, idA)) / GOAL_DIV;
+  return [
+    Math.max(0.15, Math.min(5, BASE_GOALS / 2 + sup / 2)),
+    Math.max(0.15, Math.min(5, BASE_GOALS / 2 - sup / 2)),
+  ];
+}
+
 function simScoreline(elo, idH, idA) {
-  const dr = adjElo(elo, idH) - adjElo(elo, idA);
-  const sup = dr / GOAL_DIV;
-  const lamH = Math.max(0.15, Math.min(5, BASE_GOALS / 2 + sup / 2));
-  const lamA = Math.max(0.15, Math.min(5, BASE_GOALS / 2 - sup / 2));
+  const [lamH, lamA] = groupLambdas(elo, idH, idA);
   return [poisson(lamH), poisson(lamA)];
+}
+
+// Simulate the rest of an in-progress match: keep the current score and add
+// goals over the minutes still to play. Scoring is a memoryless Poisson process,
+// so the remaining rate is just the full-match rate scaled by the fraction of
+// the match left — goals already on the board carry forward unchanged.
+function simScorelineLive(elo, idH, idA, live) {
+  const [lamH, lamA] = groupLambdas(elo, idH, idA);
+  const rem =
+    live.minute == null
+      ? 0.5
+      : Math.max(0, Math.min(1, (90 - live.minute) / 90));
+  return [live.gh + poisson(lamH * rem), live.ga + poisson(lamA * rem)];
 }
 
 // Knockout: probability the first team beats the second (draws resolved by
@@ -160,6 +178,40 @@ function predictMatch(elo, idH, idA, isGroup) {
     }
   }
   return { pH, pD, pA, scoreH: Math.round(lamH), scoreA: Math.round(lamA) };
+}
+
+// Live win/draw/win probabilities for an in-progress match: only the goals still
+// to come are random (Poisson scaled by minutes left), added onto the current
+// score. The analytic twin of simScorelineLive.
+function predictLive(elo, idH, idA, cur) {
+  const [fullH, fullA] = groupLambdas(elo, idH, idA);
+  const rem =
+    cur.minute == null
+      ? 0.5
+      : Math.max(0, Math.min(1, (90 - cur.minute) / 90));
+  const lamH = fullH * rem;
+  const lamA = fullA * rem;
+  const MAXG = 12;
+  const ph = [];
+  const pa = [];
+  for (let k = 0; k <= MAXG; k++) {
+    ph[k] = poissonPmf(lamH, k);
+    pa[k] = poissonPmf(lamA, k);
+  }
+  let pH = 0;
+  let pD = 0;
+  let pA = 0;
+  for (let rh = 0; rh <= MAXG; rh++) {
+    for (let ra = 0; ra <= MAXG; ra++) {
+      const p = ph[rh] * pa[ra];
+      const fh = cur.gh + rh;
+      const fa = cur.ga + ra;
+      if (fh > fa) pH += p;
+      else if (fh < fa) pA += p;
+      else pD += p;
+    }
+  }
+  return { pH, pD, pA };
 }
 
 // ---------- 2026 bracket structure (fixed; from the official draw) ----------
@@ -250,14 +302,22 @@ function buildGroups(live, resolveTeam) {
     if (!groups[letter]) groups[letter] = { teams: new Set(), matches: [] };
     groups[letter].teams.add(h);
     groups[letter].teams.add(a);
-    const fixed =
+    const finished =
       mt.status === "FINISHED" && mt.homeScore != null && mt.awayScore != null;
+    const inPlay =
+      (mt.status === "IN_PLAY" || mt.status === "PAUSED") &&
+      mt.homeScore != null &&
+      mt.awayScore != null;
     groups[letter].matches.push({
       h,
       a,
-      fixed,
-      gh: fixed ? mt.homeScore : null,
-      ga: fixed ? mt.awayScore : null,
+      fixed: finished,
+      gh: finished ? mt.homeScore : null,
+      ga: finished ? mt.awayScore : null,
+      // An in-progress match keeps its live score; the rest is simulated.
+      live: inPlay
+        ? { gh: mt.homeScore, ga: mt.awayScore, minute: mt.minute }
+        : null,
     });
   });
   const letters = Object.keys(groups);
@@ -312,7 +372,11 @@ function simulateOnce(elo, groups, koResults, teamIds) {
     const stat = {};
     g.teams.forEach((id) => (stat[id] = { pts: 0, gf: 0, ga: 0, w: 0, d: 0 }));
     g.matches.forEach((mt) => {
-      const [gh, ga] = mt.fixed ? [mt.gh, mt.ga] : simScoreline(elo, mt.h, mt.a);
+      const [gh, ga] = mt.fixed
+        ? [mt.gh, mt.ga]
+        : mt.live
+        ? simScorelineLive(elo, mt.h, mt.a, mt.live)
+        : simScoreline(elo, mt.h, mt.a);
       const sh = stat[mt.h];
       const sa = stat[mt.a];
       sh.gf += gh; sh.ga += ga; sa.gf += ga; sa.ga += gh;
@@ -454,6 +518,42 @@ export function projectTournament(opts) {
     .filter(Boolean)
     .sort((a, b) => new Date(a.utcDate) - new Date(b.utcDate));
 
+  // In-progress matches with their current win/draw/win probabilities.
+  const liveGames = ((live && live.matches) || [])
+    .filter(
+      (m) =>
+        (m.status === "IN_PLAY" || m.status === "PAUSED") &&
+        m.homeScore != null &&
+        m.awayScore != null
+    )
+    .map((m) => {
+      const h = resolveTeam(m.home && m.home.code, m.home && m.home.name);
+      const a = resolveTeam(m.away && m.away.code, m.away && m.away.name);
+      if (!h || !a) return null;
+      return {
+        id: m.id,
+        utcDate: m.utcDate,
+        stage: m.stage,
+        group: m.group || null,
+        status: m.status,
+        minute: m.minute,
+        home: h,
+        away: a,
+        homeName: (m.home && m.home.name) || h,
+        awayName: (m.away && m.away.name) || a,
+        homeScore: m.homeScore,
+        awayScore: m.awayScore,
+        isGroup: m.stage === "GROUP_STAGE",
+        ...predictLive(elo, h, a, {
+          gh: m.homeScore,
+          ga: m.awayScore,
+          minute: m.minute,
+        }),
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => new Date(a.utcDate) - new Date(b.utcDate));
+
   // Per-team accumulators.
   const acc = {};
   teamIds.forEach(
@@ -549,5 +649,13 @@ export function projectTournament(opts) {
     winProb: eAcc[i].wins / sims,
   }));
 
-  return { ok: true, sims, teams, entries: entryOut, groups: groupTables, predictions };
+  return {
+    ok: true,
+    sims,
+    teams,
+    entries: entryOut,
+    groups: groupTables,
+    predictions,
+    liveGames,
+  };
 }

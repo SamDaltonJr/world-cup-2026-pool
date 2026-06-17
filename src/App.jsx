@@ -1643,6 +1643,48 @@ function pct(x) {
   return Math.round(x * 100) + "%";
 }
 
+// A single in-progress match: the live score (red) and the current win/draw/win
+// probabilities given the score and time left. Home is emerald, away is sky.
+function LiveMatchRow({ m }) {
+  const minuteLabel =
+    m.status === "PAUSED" ? "HALFTIME" : m.minute ? `LIVE ${m.minute}'` : "LIVE";
+  const stageLabel = m.group
+    ? m.group.replace(/^GROUP_/, "Group ")
+    : STAGE_LABELS[m.stage] || "";
+  const w = (p) => Math.round(p * 100) + "%";
+  return (
+    <div className="py-2 border-b border-stone-100 last:border-0">
+      <div className="flex items-center gap-2">
+        <span className="flex-1 flex items-center justify-end gap-1.5 text-sm font-semibold text-stone-800 min-w-0">
+          <span className="truncate">{m.homeName}</span>
+          <Flag id={m.home} />
+        </span>
+        <span className="px-2 py-0.5 rounded bg-red-600 text-white font-mono text-sm tabular-nums shrink-0">
+          {m.homeScore}–{m.awayScore}
+        </span>
+        <span className="flex-1 flex items-center gap-1.5 text-sm font-semibold text-stone-800 min-w-0">
+          <Flag id={m.away} />
+          <span className="truncate">{m.awayName}</span>
+        </span>
+      </div>
+      <div className="flex h-2 rounded overflow-hidden my-1 bg-stone-100">
+        <div className="bg-emerald-600" style={{ width: w(m.pH) }} />
+        {m.isGroup && <div className="bg-stone-300" style={{ width: w(m.pD) }} />}
+        <div className="bg-sky-600" style={{ width: w(m.pA) }} />
+      </div>
+      <div className="flex items-center justify-between text-[11px] font-mono">
+        <span className="font-bold text-emerald-700">{w(m.pH)}</span>
+        {m.isGroup && <span className="text-stone-400">draw {w(m.pD)}</span>}
+        <span className="font-bold text-sky-700">{w(m.pA)}</span>
+      </div>
+      <div className="text-center text-[11px] mt-0.5">
+        <span className="font-bold text-red-600">{minuteLabel}</span>
+        {stageLabel ? <span className="text-stone-400"> · {stageLabel}</span> : ""}
+      </div>
+    </div>
+  );
+}
+
 // A single upcoming-match prediction: the two teams, a projected scoreline, and
 // a win/draw/win probability bar from the model. Home is emerald, away is sky.
 function MatchPredictionRow({ m }) {
@@ -2024,6 +2066,25 @@ function ForecastView({ live, locked, results }) {
               );
             })}
           </div>
+
+          {/* Live games */}
+          {proj.liveGames && proj.liveGames.length > 0 && (
+            <div className="bg-white border border-stone-200 rounded-xl p-4 mb-4">
+              <div className="flex items-baseline justify-between mb-1">
+                <span className="inline-flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-red-600 animate-pulse" />
+                  <Eyebrow>Live now</Eyebrow>
+                </span>
+                <span className="text-xs text-stone-400">win · draw · win</span>
+              </div>
+              <p className="text-xs text-stone-500 mb-3">
+                Current win probabilities from the live score and time remaining.
+              </p>
+              {proj.liveGames.map((m) => (
+                <LiveMatchRow key={m.id} m={m} />
+              ))}
+            </div>
+          )}
 
           {/* Upcoming match predictions */}
           {proj.predictions && proj.predictions.length > 0 && (
