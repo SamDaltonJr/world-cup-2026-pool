@@ -63,6 +63,22 @@ function bootMatch(pick, winner) {
   return a === b || a.includes(b) || b.includes(a);
 }
 
+// Current goal tally for a Golden Boot pick, matched against the live top-scorer
+// feed with the same matcher that awards the bonus. Returns the best-matching
+// scorer's goals, or null if the pick isn't on the scoresheet (the feed lists
+// only the top scorers, so a pick with no goals simply won't be found).
+function bootGoals(pick, live) {
+  if (!pick || !live || !Array.isArray(live.scorers)) return null;
+  let best = null;
+  for (const s of live.scorers) {
+    if (s && s.name && bootMatch(pick, s.name)) {
+      const g = s.goals || 0;
+      if (best == null || g > best) best = g;
+    }
+  }
+  return best;
+}
+
 const TIERS = [
   {
     n: 1,
@@ -934,6 +950,8 @@ function LeaderboardView({ results, settings, locked, live }) {
           maxPts: ceiling.max,
           // Share of the ceiling banked so far (team points only, no boot bonus).
           pct: ceiling.max ? teamTotal / ceiling.max : 0,
+          // Live goals scored by this entry's Golden Boot pick, if on the sheet.
+          gbGoals: bootGoals(e.goldenBoot, live),
         };
       })
       .sort((a, b) =>
@@ -1136,6 +1154,11 @@ function LeaderboardView({ results, settings, locked, live }) {
                         GB
                       </span>
                       {e.goldenBoot}
+                      {e.gbGoals != null && (
+                        <span className="font-mono text-xs text-emerald-700 ml-2">
+                          {e.gbGoals} G
+                        </span>
+                      )}
                       {e.bootBonus > 0 ? " ✓" : ""}
                     </span>
                     <span className="font-mono text-sm text-stone-600">
