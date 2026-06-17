@@ -1154,7 +1154,7 @@ function LeaderboardView({ results, settings, locked, live }) {
 
 // ---------- Analysis (pick distribution) ----------
 
-function AnalysisView({ locked, results }) {
+function AnalysisView({ locked, results, live }) {
   const [entries, setEntries] = useState(null);
   const [loadError, setLoadError] = useState("");
 
@@ -1598,6 +1598,53 @@ function AnalysisView({ locked, results }) {
           </div>
         );
       })}
+
+      {live && live.scorers && live.scorers.length > 0 && (
+        <div className="bg-white border border-stone-200 rounded-xl p-4 mb-4">
+          <div className="flex items-baseline justify-between mb-2">
+            <Eyebrow>Golden Boot race</Eyebrow>
+            <span className="text-xs text-stone-400">goals · picked by pool</span>
+          </div>
+          {live.scorers.slice(0, 15).map((s, i) => {
+            const id = liveTeamToId(s.teamTla, s.team);
+            const picks = (entries || []).filter((e) =>
+              bootMatch(e.goldenBoot, s.name)
+            ).length;
+            return (
+              <div
+                key={(s.name || "") + i}
+                className="flex items-center justify-between gap-2 py-1.5 border-b border-stone-100 last:border-0"
+              >
+                <span className="flex items-center gap-2 min-w-0">
+                  <span className="w-5 text-center font-mono text-xs text-stone-400 shrink-0">
+                    {i + 1}
+                  </span>
+                  <Flag id={id} />
+                  <span className="text-sm font-semibold text-stone-800 truncate">
+                    {s.name || "—"}
+                  </span>
+                  {picks > 0 && (
+                    <span className="text-[10px] font-bold text-amber-700 bg-amber-50 border border-amber-200 rounded px-1.5 py-0.5 shrink-0">
+                      ★ {picks} picked
+                    </span>
+                  )}
+                </span>
+                <span className="font-mono text-sm shrink-0">
+                  <span className="font-bold text-emerald-800">{s.goals}</span>
+                  <span className="text-stone-400"> G</span>
+                  {s.assists != null && s.assists > 0 && (
+                    <span className="text-stone-400"> · {s.assists} A</span>
+                  )}
+                </span>
+              </div>
+            );
+          })}
+          <p className="text-xs text-stone-400 mt-2">
+            Live top scorers from the feed. ★ marks players someone picked for the
+            Golden Boot ({GOLDEN_BOOT_PTS} bonus pts).
+          </p>
+        </div>
+      )}
 
       {bootCounts.length > 0 && (
         <div className="bg-white border border-stone-200 rounded-xl p-4">
@@ -3304,7 +3351,7 @@ export default function WorldCupTierPool() {
         ) : activeTab === "results" ? (
           <ResultsView live={live} />
         ) : activeTab === "analysis" ? (
-          <AnalysisView locked={locked} results={results} />
+          <AnalysisView locked={locked} results={results} live={live} />
         ) : activeTab === "forecast" ? (
           <ForecastView live={live} locked={locked} results={results} />
         ) : activeTab === "rules" ? (

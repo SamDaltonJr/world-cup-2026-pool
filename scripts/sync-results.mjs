@@ -123,6 +123,20 @@ async function fetchFromFootballData() {
   return { matches, standings };
 }
 
+// Top scorers (Golden Boot race). Compact shape keyed to what the app renders.
+async function fetchScorers() {
+  const j = await apiGet(`/competitions/${COMPETITION}/scorers?limit=25`);
+  return (j.scorers || []).map((s) => ({
+    name: (s.player && s.player.name) || null,
+    nationality: (s.player && s.player.nationality) || null,
+    team: (s.team && s.team.name) || null,
+    teamTla: (s.team && s.team.tla) || null,
+    goals: s.goals ?? 0,
+    assists: s.assists ?? null,
+    penalties: s.penalties ?? null,
+  }));
+}
+
 // ---------- api-football (live in-play scores only) ----------
 
 // Canonicalize a country name so football-data's and api-football's spellings
@@ -303,6 +317,15 @@ async function main() {
   const { matches: fdMatches, standings } = await fetchFromFootballData();
   const prev = await getPrevPayload();
 
+  // Top scorers for the Golden Boot race. Best-effort: if the endpoint isn't
+  // available on this plan, keep the last known list rather than blanking it.
+  let scorers = (prev && prev.scorers) || [];
+  try {
+    scorers = await fetchScorers();
+  } catch (e) {
+    console.error("sync-results: scorers fetch failed:", e.message);
+  }
+
   // Only spend an api-football call when a match is plausibly in progress, and
   // no more than once per ~15 minutes, to stay comfortably under the free
   // 100/day cap. (Busiest day of the tournament is 5 spread-out matches ≈ 55
@@ -348,11 +371,13 @@ async function main() {
       : "football-data.org",
     matches,
     standings,
+    scorers,
   };
   await upsertLive(payload);
   console.log(
     `sync-results: stored ${matches.length} matches (${liveCount} live), ` +
-      `${standings.length} group tables. window=${inWindow} fetchedLive=${fetchedLive}`
+      `${standings.length} group tables, ${scorers.length} scorers. ` +
+      `window=${inWindow} fetchedLive=${fetchedLive}`
   );
 }
 
