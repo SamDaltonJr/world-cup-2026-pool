@@ -1858,6 +1858,27 @@ function ForecastView({ live, locked, results }) {
       .sort((a, b) => b.winProb - a.winProb || b.projTotal - a.projTotal);
   }, [proj, entries, results]);
 
+  // Highest projected lineup: the best-projected team(s) in each tier. Like the
+  // Analysis tab's optimal lineup, but ranked on forecast points rather than
+  // points banked so far — the most a valid lineup is projected to score.
+  const projOptimal = useMemo(() => {
+    if (!proj || !proj.ok) return null;
+    const picks = [];
+    TIERS.forEach((t) => {
+      [...t.teams]
+        .map((tm) => ({
+          id: tm.id,
+          name: tm.name,
+          tier: t.n,
+          proj: proj.teams[tm.id] ? proj.teams[tm.id].projPts : 0,
+        }))
+        .sort((a, b) => b.proj - a.proj)
+        .slice(0, t.pickCount)
+        .forEach((p) => picks.push(p));
+    });
+    return { picks, total: picks.reduce((s, p) => s + p.proj, 0) };
+  }, [proj]);
+
   // Field ownership (how many entries hold each team) and the consensus lineup
   // (most-picked team[s] per tier), for the per-entry "differentiators" shown
   // when an entry is expanded — mirrors the Analysis tab's uniqueness view.
@@ -2192,6 +2213,44 @@ function ForecastView({ live, locked, results }) {
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-3">
                 {proj.groups.map((g) => (
                   <ProjGroupTable key={g.group} g={g} />
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Highest projected lineup (optimal by forecast points) */}
+          {projOptimal && (
+            <div className="bg-white border border-stone-200 rounded-xl p-4 mb-4">
+              <div className="flex items-baseline justify-between mb-1">
+                <Eyebrow>Highest projected lineup</Eyebrow>
+                <span className="font-mono font-bold text-emerald-800 text-lg">
+                  {projOptimal.total.toFixed(1)}
+                </span>
+              </div>
+              <p className="text-xs text-stone-500 mb-3">
+                The highest-projected team in each tier — the most a valid lineup
+                is forecast to score from here.
+                {poolRows.length
+                  ? ` The top projected entry is on ${Math.max(
+                      ...poolRows.map((e) => e.projTotal)
+                    ).toFixed(0)}.`
+                  : ""}
+              </p>
+              <div className="flex flex-wrap gap-1.5">
+                {projOptimal.picks.map((p) => (
+                  <span
+                    key={p.id}
+                    className="inline-flex items-center gap-1 px-2 py-1 rounded-lg border border-stone-200 bg-stone-50 text-xs"
+                  >
+                    <span className="font-mono text-[10px] text-stone-400">
+                      T{p.tier}
+                    </span>
+                    <Flag id={p.id} />
+                    <span className="font-semibold text-stone-700">{p.name}</span>
+                    <span className="font-mono font-bold text-emerald-800">
+                      {p.proj.toFixed(1)}
+                    </span>
+                  </span>
                 ))}
               </div>
             </div>
