@@ -121,6 +121,47 @@ function koWinProb(elo, idA, idB) {
   return 1 / (1 + Math.pow(10, -dr / KO_DIV));
 }
 
+// Poisson probability mass at k for mean lam.
+function poissonPmf(lam, k) {
+  let fact = 1;
+  for (let i = 2; i <= k; i++) fact *= i;
+  return (Math.exp(-lam) * Math.pow(lam, k)) / fact;
+}
+
+// Analytic prediction for a single upcoming match from the two teams' Elo. For
+// group games (draws allowed) it convolves the two Poisson scoring distributions
+// into P(home win)/P(draw)/P(away win); for knockouts it uses the logistic
+// win probability (no draw). The projected scoreline is each side's expected
+// goals, rounded. Mirrors the simulation's match model so the two agree.
+function predictMatch(elo, idH, idA, isGroup) {
+  if (!isGroup) {
+    const p = koWinProb(elo, idH, idA);
+    return { pH: p, pD: 0, pA: 1 - p, scoreH: null, scoreA: null };
+  }
+  const sup = (adjElo(elo, idH) - adjElo(elo, idA)) / GOAL_DIV;
+  const lamH = Math.max(0.15, Math.min(5, BASE_GOALS / 2 + sup / 2));
+  const lamA = Math.max(0.15, Math.min(5, BASE_GOALS / 2 - sup / 2));
+  const MAXG = 10;
+  const ph = [];
+  const pa = [];
+  for (let k = 0; k <= MAXG; k++) {
+    ph[k] = poissonPmf(lamH, k);
+    pa[k] = poissonPmf(lamA, k);
+  }
+  let pH = 0;
+  let pD = 0;
+  let pA = 0;
+  for (let h = 0; h <= MAXG; h++) {
+    for (let a = 0; a <= MAXG; a++) {
+      const p = ph[h] * pa[a];
+      if (h > a) pH += p;
+      else if (h < a) pA += p;
+      else pD += p;
+    }
+  }
+  return { pH, pD, pA, scoreH: Math.round(lamH), scoreA: Math.round(lamA) };
+}
+
 // ---------- 2026 bracket structure (fixed; from the official draw) ----------
 // Round of 32. Each slot is a group winner (W), runner-up (R), or one of the
 // eight third-place qualifiers drawn from a fixed cluster of groups (3 + from).
@@ -389,6 +430,30 @@ export function projectTournament(opts) {
   // Current ratings: the snapshot updated by every match already played.
   const elo = liveElo(live, resolveTeam, stageToKo);
 
+  // Per-match predictions for upcoming (not-yet-started) games with known teams.
+  const predictions = ((live && live.matches) || [])
+    .filter((m) => m.status === "SCHEDULED" || m.status === "TIMED")
+    .map((m) => {
+      const h = resolveTeam(m.home && m.home.code, m.home && m.home.name);
+      const a = resolveTeam(m.away && m.away.code, m.away && m.away.name);
+      if (!h || !a) return null;
+      const isGroup = m.stage === "GROUP_STAGE";
+      return {
+        id: m.id,
+        utcDate: m.utcDate,
+        stage: m.stage,
+        group: m.group || null,
+        home: h,
+        away: a,
+        homeName: (m.home && m.home.name) || h,
+        awayName: (m.away && m.away.name) || a,
+        isGroup,
+        ...predictMatch(elo, h, a, isGroup),
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => new Date(a.utcDate) - new Date(b.utcDate));
+
   // Per-team accumulators.
   const acc = {};
   teamIds.forEach(
@@ -484,5 +549,5 @@ export function projectTournament(opts) {
     winProb: eAcc[i].wins / sims,
   }));
 
-  return { ok: true, sims, teams, entries: entryOut, groups: groupTables };
+  return { ok: true, sims, teams, entries: entryOut, groups: groupTables, predictions };
 }

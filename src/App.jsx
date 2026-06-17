@@ -1643,6 +1643,50 @@ function pct(x) {
   return Math.round(x * 100) + "%";
 }
 
+// A single upcoming-match prediction: the two teams, a projected scoreline, and
+// a win/draw/win probability bar from the model. Home is emerald, away is sky.
+function MatchPredictionRow({ m }) {
+  const when = new Date(m.utcDate).toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+  const stageLabel = m.group
+    ? m.group.replace(/^GROUP_/, "Group ")
+    : STAGE_LABELS[m.stage] || "";
+  const meta = when + (stageLabel ? " · " + stageLabel : "");
+  const w = (p) => Math.round(p * 100) + "%";
+  return (
+    <div className="py-2 border-b border-stone-100 last:border-0">
+      <div className="flex items-center gap-2">
+        <span className="flex-1 flex items-center justify-end gap-1.5 text-sm font-semibold text-stone-800 min-w-0">
+          <span className="truncate">{m.homeName}</span>
+          <Flag id={m.home} />
+        </span>
+        <span className="font-mono text-xs text-stone-500 px-1 shrink-0">
+          {m.isGroup ? `${m.scoreH}–${m.scoreA}` : "vs"}
+        </span>
+        <span className="flex-1 flex items-center gap-1.5 text-sm font-semibold text-stone-800 min-w-0">
+          <Flag id={m.away} />
+          <span className="truncate">{m.awayName}</span>
+        </span>
+      </div>
+      <div className="flex h-2 rounded overflow-hidden my-1 bg-stone-100">
+        <div className="bg-emerald-600" style={{ width: w(m.pH) }} />
+        {m.isGroup && <div className="bg-stone-300" style={{ width: w(m.pD) }} />}
+        <div className="bg-sky-600" style={{ width: w(m.pA) }} />
+      </div>
+      <div className="flex items-center justify-between text-[11px] font-mono">
+        <span className="font-bold text-emerald-700">{w(m.pH)}</span>
+        {m.isGroup && <span className="text-stone-400">draw {w(m.pD)}</span>}
+        <span className="font-bold text-sky-700">{w(m.pA)}</span>
+      </div>
+      <div className="text-center text-[11px] text-stone-400 mt-0.5">{meta}</div>
+    </div>
+  );
+}
+
 // A projected final group table: teams ranked by expected league points, with
 // the full odds of finishing in each spot 1–4. Each team's most-likely finish
 // is emphasized, and the two projected qualifiers are highlighted in emerald.
@@ -1728,6 +1772,7 @@ function ForecastView({ live, locked, results }) {
   const [sims, setSims] = useState(10000);
   const [sortBy, setSortBy] = useState("pts"); // "pts" | "champ"
   const [expanded, setExpanded] = useState(null); // expanded pool-entry name
+  const [showAllMatches, setShowAllMatches] = useState(false);
 
   const loadEntries = async () => {
     setLoadError("");
@@ -1958,6 +2003,36 @@ function ForecastView({ live, locked, results }) {
               );
             })}
           </div>
+
+          {/* Upcoming match predictions */}
+          {proj.predictions && proj.predictions.length > 0 && (
+            <div className="bg-white border border-stone-200 rounded-xl p-4 mb-4">
+              <div className="flex items-baseline justify-between mb-1">
+                <Eyebrow>Upcoming match predictions</Eyebrow>
+                <span className="text-xs text-stone-400">win · draw · win</span>
+              </div>
+              <p className="text-xs text-stone-500 mb-3">
+                Model odds for the next matches from each side&apos;s current Elo
+                (host edge included). Score is each team&apos;s projected goals.
+              </p>
+              {(showAllMatches
+                ? proj.predictions
+                : proj.predictions.slice(0, 8)
+              ).map((m) => (
+                <MatchPredictionRow key={m.id} m={m} />
+              ))}
+              {proj.predictions.length > 8 && (
+                <button
+                  onClick={() => setShowAllMatches((v) => !v)}
+                  className="mt-2 text-xs font-semibold text-emerald-700 hover:text-emerald-900"
+                >
+                  {showAllMatches
+                    ? "Show fewer"
+                    : `Show all ${proj.predictions.length}`}
+                </button>
+              )}
+            </div>
+          )}
 
           {/* Pool forecast (entries) */}
           {locked && poolRows.length > 0 && (
