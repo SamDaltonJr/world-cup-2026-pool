@@ -22,13 +22,14 @@
 //     projections sharpen as the tournament is played.
 //   • Hosts (USA/Canada/Mexico) carry a small Elo bump in every match.
 //
-// Known approximation: which of the eight qualifying third-place teams lands in
-// which Round-of-32 slot follows FIFA's published cluster constraints (each slot
-// only accepts a third from a fixed set of groups) via a valid bipartite
-// matching, not FIFA's exact 495-row lookup table. The bracket shape is exact;
-// only the precise third-place routing is approximated, which barely moves a
-// team's round-by-round odds across many simulations.
+// Third-place routing is exact: which of the eight qualifying third-place teams
+// lands in which Round-of-32 slot uses FIFA's official 495-row allocation table
+// (Annex C), keyed by the sorted set of qualifying groups. See
+// ./thirdsAllocation.js. A bipartite-matching fallback is retained but never
+// reached for a valid 8-of-12 set.
 // ============================================================
+
+import { THIRDS_ALLOCATION, THIRD_SEAT_MATCH } from "./thirdsAllocation.js";
 
 // Current Elo snapshot (≈14 June 2026). Top tier from eloratings.net; the rest
 // from international-football.net's table on the same date (both anchored on the
@@ -299,11 +300,26 @@ function slotLabel(s) {
   return s.t === "W" ? "1" + s.g : s.t === "R" ? "2" + s.g : "3rd";
 }
 
-// Assign each qualifying third-place group to a distinct third slot whose
-// cluster allows it (a perfect bipartite matching, always solvable for the 495
-// valid combinations). Returns { [matchNumber]: groupLetter }. Groups are tried
-// alphabetically so the assignment is deterministic.
+// Assign each qualifying third-place group to its Round-of-32 slot using FIFA's
+// official allocation table (Annex C): the eight qualifying groups, sorted, key
+// a row that fixes which third fills each winner seat. Returns { [matchNumber]:
+// groupLetter }. Falls back to a bipartite matching only if a combination is
+// somehow absent from the table (never happens for a valid 8-of-12 set).
 function assignThirds(qualGroups) {
+  const key = [...qualGroups].sort().join("");
+  const row = THIRDS_ALLOCATION[key];
+  if (row && row.length === 8) {
+    const out = {};
+    for (let i = 0; i < 8; i++) out[THIRD_SEAT_MATCH[i]] = row[i];
+    return out;
+  }
+  return assignThirdsFallback(qualGroups);
+}
+
+// Fallback: the first valid bipartite matching whose clusters allow it (groups
+// tried alphabetically). Retained only for safety if the official table is ever
+// missing a combination.
+function assignThirdsFallback(qualGroups) {
   const groups = [...qualGroups].sort();
   const used = new Set();
   const out = {};
