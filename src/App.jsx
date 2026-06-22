@@ -1877,14 +1877,25 @@ function ProjGroupTable({ g }) {
 }
 
 // One team in a bracket slot: flag + code, with its probability of reaching the
-// slot. The model's predicted advancer is bold on an emerald tint.
-function BracketSeat({ seat, isWinner }) {
+// slot. The model's predicted advancer is bold on an emerald tint. When the slot
+// has more than one possible team, it's a button — hover (desktop) or tap
+// (mobile) opens the full distribution via the shared `api`.
+function BracketSeat({ seat, isWinner, seatKey, label, api }) {
   const name = seat.id && ALL_TEAMS[seat.id] ? ALL_TEAMS[seat.id].name : "";
+  const hasList = !!(api && seat.all && seat.all.length > 1);
+  const rect = (e) => e.currentTarget.getBoundingClientRect();
   return (
-    <div
+    <button
+      type="button"
+      disabled={!hasList}
+      onClick={hasList ? (e) => api.click(seatKey, rect(e), seat, label) : undefined}
+      onMouseEnter={hasList ? (e) => api.hover(seatKey, rect(e), seat, label) : undefined}
+      onMouseLeave={hasList ? () => api.end(seatKey) : undefined}
       className={
-        "flex items-center justify-between gap-1 px-1.5 py-1 " +
-        (isWinner ? "bg-emerald-50" : "")
+        "w-full flex items-center justify-between gap-1 px-1.5 py-1 text-left transition-colors " +
+        (isWinner ? "bg-emerald-50 " : "") +
+        (hasList ? "cursor-pointer hover:bg-stone-100" : "cursor-default") +
+        (api && api.openKey === seatKey ? " ring-1 ring-inset ring-emerald-400" : "")
       }
     >
       <span className="flex items-center gap-1 min-w-0">
@@ -1902,20 +1913,102 @@ function BracketSeat({ seat, isWinner }) {
       <span className="text-[10px] font-mono text-stone-400 shrink-0">
         {pct(seat.p)}
       </span>
-    </div>
+    </button>
   );
 }
 
 // One bracket box: two seats stacked, winner highlighted.
-function BracketMatch({ match }) {
+function BracketMatch({ match, api }) {
   const aw = match.winner.id && match.seatA.id === match.winner.id;
   const bw = match.winner.id && match.seatB.id === match.winner.id;
   return (
     <div className="border border-stone-200 rounded-md overflow-hidden bg-white w-[116px] shrink-0">
-      <BracketSeat seat={match.seatA} isWinner={aw} />
+      <BracketSeat
+        seat={match.seatA}
+        isWinner={aw}
+        seatKey={`${match.m}-a`}
+        label="Chance to reach this slot"
+        api={api}
+      />
       <div className="border-t border-stone-100" />
-      <BracketSeat seat={match.seatB} isWinner={bw} />
+      <BracketSeat
+        seat={match.seatB}
+        isWinner={bw}
+        seatKey={`${match.m}-b`}
+        label="Chance to reach this slot"
+        api={api}
+      />
     </div>
+  );
+}
+
+// Floating panel listing every team that could fill a slot, most- to least-
+// likely. Fixed-positioned so it escapes the bracket's horizontal scroll clip;
+// flips above the seat when there isn't room below.
+function SeatDistributionPopover({ open, onClose }) {
+  const POP_W = 188;
+  const ROW_H = 22; // one team row (slight over-estimate keeps the clamp safe)
+  const CHROME_H = 56; // header + vertical padding
+  const teams = open.seat.all;
+  const r = open.rect;
+  const vw = typeof window !== "undefined" ? window.innerWidth : 360;
+  const vh = typeof window !== "undefined" ? window.innerHeight : 640;
+  // List scrolls past 9 rows; the popover's height is therefore exactly known,
+  // so we can clamp it fully inside the viewport on both axes.
+  const listH = Math.min(teams.length, 9) * ROW_H;
+  const popH = CHROME_H + listH;
+  const left = Math.min(Math.max(8, r.left), vw - POP_W - 8);
+  // Prefer below the seat; flip above when it wouldn't fit. Then clamp so the
+  // panel never runs off the top or bottom edge regardless of choice.
+  const rawTop = r.bottom + 6 + popH > vh - 8 ? r.top - 6 - popH : r.bottom + 6;
+  const top = Math.max(8, Math.min(rawTop, vh - 8 - popH));
+  return (
+    <>
+      {open.pinned && (
+        <div className="fixed inset-0 z-40" onClick={onClose} aria-hidden />
+      )}
+      <div
+        className="fixed z-50 bg-white border border-stone-200 rounded-lg shadow-xl p-2"
+        style={{ left, top, width: POP_W }}
+      >
+        <div className="flex items-center justify-between gap-2 mb-1.5 px-0.5">
+          <span className="text-[10px] font-bold uppercase tracking-wider text-stone-400">
+            {open.label}
+          </span>
+          {open.pinned && (
+            <button
+              type="button"
+              onClick={onClose}
+              className="text-stone-300 hover:text-stone-500 text-xs leading-none shrink-0"
+              aria-label="Close"
+            >
+              ✕
+            </button>
+          )}
+        </div>
+        <div
+          className="overflow-y-auto -mr-1 pr-1"
+          style={{ maxHeight: listH }}
+        >
+          {teams.map((t) => (
+            <div
+              key={t.id}
+              className="flex items-center justify-between gap-2 py-0.5"
+            >
+              <span className="flex items-center gap-1.5 min-w-0">
+                <Flag id={t.id} />
+                <span className="text-[11px] text-stone-700 truncate">
+                  {ALL_TEAMS[t.id] ? ALL_TEAMS[t.id].name : t.id}
+                </span>
+              </span>
+              <span className="text-[10px] font-mono text-stone-400 shrink-0">
+                {pct(t.p)}
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </>
   );
 }
 
@@ -1935,6 +2028,37 @@ function BracketColumn({ title, children }) {
 // The projected bracket: most-likely team in each knockout slot, left-to-right
 // from the Round of 32 to the final, with reach probabilities.
 function BracketView({ bracket }) {
+  // open = { key, rect, seat, label, pinned } for the slot whose full team
+  // distribution is showing. Hover opens it unpinned; a click/tap pins it so it
+  // survives mouse-leave (the only way to inspect it on touch devices).
+  const [open, setOpen] = useState(null);
+  const close = () => setOpen(null);
+  const api = {
+    openKey: open ? open.key : null,
+    hover: (key, rect, seat, label) =>
+      setOpen((cur) =>
+        cur && cur.pinned ? cur : { key, rect, seat, label, pinned: false }
+      ),
+    end: (key) =>
+      setOpen((cur) =>
+        cur && cur.key === key && !cur.pinned ? null : cur
+      ),
+    click: (key, rect, seat, label) =>
+      setOpen((cur) =>
+        cur && cur.key === key && cur.pinned
+          ? null
+          : { key, rect, seat, label, pinned: true }
+      ),
+  };
+
+  // Close on Escape so a pinned popover is dismissable without a stray tap.
+  useEffect(() => {
+    if (!open) return undefined;
+    const onKey = (e) => e.key === "Escape" && close();
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open]);
+
   if (!bracket) return null;
   const champ = bracket.final.winner;
   const third = bracket.third.winner;
@@ -1948,36 +2072,40 @@ function BracketView({ bracket }) {
       <p className="text-xs text-stone-500 mb-3">
         The most likely team to fill each slot, from the same simulations. The
         bold side is the model&apos;s pick to advance; the percentage is how often
-        that team reaches that round. Scroll sideways to follow the path to the
-        final.
+        that team reaches that round. Hover or tap any slot to see every team that
+        could land there. Scroll sideways to follow the path to the final.
       </p>
-      <div className="overflow-x-auto -mx-1 px-1 pb-1">
+      <div
+        className="overflow-x-auto -mx-1 px-1 pb-1"
+        onScroll={open ? close : undefined}
+      >
         <div className="flex gap-3 items-stretch min-w-max">
           <BracketColumn title="Round of 32">
             {bracket.r32.map((m) => (
-              <BracketMatch key={m.m} match={m} />
+              <BracketMatch key={m.m} match={m} api={api} />
             ))}
           </BracketColumn>
           <BracketColumn title="Round of 16">
             {bracket.r16.map((m) => (
-              <BracketMatch key={m.m} match={m} />
+              <BracketMatch key={m.m} match={m} api={api} />
             ))}
           </BracketColumn>
           <BracketColumn title="Quarterfinals">
             {bracket.qf.map((m) => (
-              <BracketMatch key={m.m} match={m} />
+              <BracketMatch key={m.m} match={m} api={api} />
             ))}
           </BracketColumn>
           <BracketColumn title="Semifinals">
             {bracket.sf.map((m) => (
-              <BracketMatch key={m.m} match={m} />
+              <BracketMatch key={m.m} match={m} api={api} />
             ))}
           </BracketColumn>
           <BracketColumn title="Final">
-            <BracketMatch match={bracket.final} />
+            <BracketMatch match={bracket.final} api={api} />
           </BracketColumn>
         </div>
       </div>
+      {open && <SeatDistributionPopover open={open} onClose={close} />}
       {champ.id && (
         <div className="mt-3 flex items-center gap-2 text-sm flex-wrap">
           <span className="text-xs font-bold uppercase tracking-wider text-amber-600">

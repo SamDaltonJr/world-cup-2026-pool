@@ -720,29 +720,31 @@ export function projectTournament(opts) {
     winProb: eAcc[i].wins / sims,
   }));
 
-  // The projected bracket: for each knockout match, the two most-likely teams to
-  // fill its seats (with their probability of reaching that seat) and the most-
-  // likely team to advance from it. Drawn left-to-right, R32 → Final.
-  const topTwo = (counter) => {
-    let i1 = null, c1 = -1, i2 = null, c2 = -1;
+  // The projected bracket: for each knockout match, the full distribution of
+  // teams that could fill each seat (sorted most- to least-likely, with each
+  // team's probability of reaching that seat) plus the most-likely advancer.
+  // `id`/`p` are the top team; `all` is every candidate with a non-zero chance.
+  // Drawn left-to-right, R32 → Final.
+  const seatDist = (counter) => {
+    const all = [];
     for (const k in counter) {
-      const v = counter[k];
-      if (v > c1) { i2 = i1; c2 = c1; i1 = k; c1 = v; }
-      else if (v > c2) { i2 = k; c2 = v; }
+      if (counter[k] > 0) all.push({ id: k, p: counter[k] / sims });
     }
+    all.sort((x, y) => y.p - x.p);
     return {
-      id: i1,
-      p: c1 <= 0 ? 0 : c1 / sims,
-      alt: i2 ? { id: i2, p: c2 / sims } : null,
+      id: all.length ? all[0].id : null,
+      p: all.length ? all[0].p : 0,
+      alt: all.length > 1 ? { id: all[1].id, p: all[1].p } : null,
+      all,
     };
   };
   const mkMatch = (m, extra) => {
     const e = bracketAcc[m] || { a: {}, b: {}, w: {} };
     return {
       m,
-      seatA: topTwo(e.a),
-      seatB: topTwo(e.b),
-      winner: topTwo(e.w),
+      seatA: seatDist(e.a),
+      seatB: seatDist(e.b),
+      winner: seatDist(e.w),
       ...extra,
     };
   };
