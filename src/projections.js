@@ -405,6 +405,33 @@ function buildKoResults(live, resolveTeam, stageToKo) {
   return out;
 }
 
+// Order teams that are level on overall points, goal difference, and goals
+// scored. FIFA then ranks them by results *among themselves* — head-to-head
+// points, then head-to-head goal difference, then head-to-head goals — before
+// falling back to rating (a deterministic stand-in for fair-play / drawing of
+// lots). `pool` is every group match's scoreline { h, a, gh, ga }.
+function breakH2H(ids, pool, elo) {
+  const set = new Set(ids);
+  const h = {};
+  ids.forEach((id) => (h[id] = { pts: 0, gf: 0, ga: 0 }));
+  pool.forEach((m) => {
+    if (!set.has(m.h) || !set.has(m.a)) return;
+    const a = h[m.h];
+    const b = h[m.a];
+    a.gf += m.gh; a.ga += m.ga; b.gf += m.ga; b.ga += m.gh;
+    if (m.gh > m.ga) a.pts += 3;
+    else if (m.ga > m.gh) b.pts += 3;
+    else { a.pts++; b.pts++; }
+  });
+  return [...ids].sort(
+    (x, y) =>
+      h[y].pts - h[x].pts ||
+      (h[y].gf - h[y].ga) - (h[x].gf - h[x].ga) ||
+      h[y].gf - h[x].gf ||
+      adjElo(elo, y) - adjElo(elo, x)
+  );
+}
+
 function koDecide(elo, idA, idB, koResults) {
   const real = koResults[[idA, idB].sort().join("|")];
   if (real) return real === idA ? idA : idB;
@@ -436,12 +463,14 @@ function simulateOnce(elo, groups, koResults, teamIds, bracketAcc) {
     const g = groups[letter];
     const stat = {};
     g.teams.forEach((id) => (stat[id] = { pts: 0, gf: 0, ga: 0, w: 0, d: 0 }));
+    const played = []; // each match's scoreline, for head-to-head tiebreaks
     g.matches.forEach((mt) => {
       const [gh, ga] = mt.fixed
         ? [mt.gh, mt.ga]
         : mt.live
         ? simScorelineLive(elo, mt.h, mt.a, mt.live)
         : simScoreline(elo, mt.h, mt.a);
+      played.push({ h: mt.h, a: mt.a, gh, ga });
       const sh = stat[mt.h];
       const sa = stat[mt.a];
       sh.gf += gh; sh.ga += ga; sa.gf += ga; sa.ga += gh;
@@ -449,7 +478,9 @@ function simulateOnce(elo, groups, koResults, teamIds, bracketAcc) {
       else if (ga > gh) { sa.pts += 3; sa.w++; }
       else { sh.pts++; sa.pts++; sh.d++; sa.d++; }
     });
-    const ranked = g.teams
+    // Rank by the overall criteria (points, goal difference, goals scored),
+    // then settle any teams still level by head-to-head results among them.
+    const base = g.teams
       .map((id) => ({
         id,
         pts: stat[id].pts,
@@ -458,11 +489,26 @@ function simulateOnce(elo, groups, koResults, teamIds, bracketAcc) {
         w: stat[id].w,
         d: stat[id].d,
       }))
-      .sort(
-        (x, y) =>
-          y.pts - x.pts || y.gd - x.gd || y.gf - x.gf ||
-          adjElo(elo, y.id) - adjElo(elo, x.id)
-      );
+      .sort((x, y) => y.pts - x.pts || y.gd - x.gd || y.gf - x.gf || 0);
+    const ranked = [];
+    for (let i = 0; i < base.length; ) {
+      let j = i + 1;
+      while (
+        j < base.length &&
+        base[j].pts === base[i].pts &&
+        base[j].gd === base[i].gd &&
+        base[j].gf === base[i].gf
+      )
+        j++;
+      if (j - i === 1) {
+        ranked.push(base[i]);
+      } else {
+        breakH2H(base.slice(i, j).map((b) => b.id), played, elo).forEach((id) =>
+          ranked.push(base.find((b) => b.id === id))
+        );
+      }
+      i = j;
+    }
     groupRank[letter] = ranked;
     ranked.forEach((r, i) => {
       res[r.id].gw = r.w;
