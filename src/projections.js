@@ -405,12 +405,18 @@ function buildKoResults(live, resolveTeam, stageToKo) {
   return out;
 }
 
-// Order teams that are level on overall points, goal difference, and goals
-// scored. FIFA then ranks them by results *among themselves* — head-to-head
-// points, then head-to-head goal difference, then head-to-head goals — before
-// falling back to rating (a deterministic stand-in for fair-play / drawing of
-// lots). `pool` is every group match's scoreline { h, a, gh, ga }.
-function breakH2H(ids, pool, elo) {
+// Rank a set of teams that are level on overall points, per the 2026 FIFA
+// criteria order. New for this tournament: head-to-head results among the tied
+// teams are applied FIRST (points, then goal difference, then goals), ahead of
+// overall goal difference / goals — the reverse of every World Cup before 2026.
+// Rating stands in for the final fair-play / FIFA-ranking steps.
+//
+// Applied recursively: once head-to-head splits the tied set, each still-level
+// subset is re-ranked from the top of the criteria (FIFA re-applies the whole
+// sequence to the smaller group). `overall` is each team's full-group line and
+// `pool` is every group match's scoreline { h, a, gh, ga }.
+function rankTied(ids, overall, pool, elo) {
+  if (ids.length <= 1) return ids.slice();
   const set = new Set(ids);
   const h = {};
   ids.forEach((id) => (h[id] = { pts: 0, gf: 0, ga: 0 }));
@@ -423,13 +429,36 @@ function breakH2H(ids, pool, elo) {
     else if (m.ga > m.gh) b.pts += 3;
     else { a.pts++; b.pts++; }
   });
-  return [...ids].sort(
-    (x, y) =>
-      h[y].pts - h[x].pts ||
-      (h[y].gf - h[y].ga) - (h[x].gf - h[x].ga) ||
-      h[y].gf - h[x].gf ||
-      adjElo(elo, y) - adjElo(elo, x)
-  );
+  // Compare on the head-to-head sub-table only.
+  const cmp = (x, y) =>
+    h[y].pts - h[x].pts ||
+    (h[y].gf - h[y].ga) - (h[x].gf - h[x].ga) ||
+    h[y].gf - h[x].gf;
+  const sorted = ids.slice().sort(cmp);
+  const out = [];
+  for (let i = 0; i < sorted.length; ) {
+    let j = i + 1;
+    while (j < sorted.length && cmp(sorted[i], sorted[j]) === 0) j++;
+    const block = sorted.slice(i, j);
+    if (block.length === ids.length) {
+      // Head-to-head separated no one: fall through to overall GD, overall
+      // goals, then rating. No further recursion can help this block.
+      block.sort(
+        (x, y) =>
+          overall[y].gd - overall[x].gd ||
+          overall[y].gf - overall[x].gf ||
+          adjElo(elo, y) - adjElo(elo, x)
+      );
+      out.push(...block);
+    } else if (block.length === 1) {
+      out.push(block[0]);
+    } else {
+      // A genuine sub-tie: re-apply the whole sequence to just these teams.
+      out.push(...rankTied(block, overall, pool, elo));
+    }
+    i = j;
+  }
+  return out;
 }
 
 function koDecide(elo, idA, idB, koResults) {
@@ -478,37 +507,35 @@ function simulateOnce(elo, groups, koResults, teamIds, bracketAcc) {
       else if (ga > gh) { sa.pts += 3; sa.w++; }
       else { sh.pts++; sa.pts++; sh.d++; sa.d++; }
     });
-    // Rank by the overall criteria (points, goal difference, goals scored),
-    // then settle any teams still level by head-to-head results among them.
-    const base = g.teams
-      .map((id) => ({
-        id,
+    // Rank by points, then settle any teams level on points by the 2026 FIFA
+    // order — head-to-head among them first, then overall GD/goals, then rating.
+    const overall = {};
+    g.teams.forEach((id) => {
+      overall[id] = {
         pts: stat[id].pts,
         gd: stat[id].gf - stat[id].ga,
         gf: stat[id].gf,
-        w: stat[id].w,
-        d: stat[id].d,
-      }))
-      .sort((x, y) => y.pts - x.pts || y.gd - x.gd || y.gf - x.gf || 0);
-    const ranked = [];
-    for (let i = 0; i < base.length; ) {
+      };
+    });
+    const byPoints = g.teams
+      .slice()
+      .sort((x, y) => overall[y].pts - overall[x].pts);
+    const order = [];
+    for (let i = 0; i < byPoints.length; ) {
       let j = i + 1;
-      while (
-        j < base.length &&
-        base[j].pts === base[i].pts &&
-        base[j].gd === base[i].gd &&
-        base[j].gf === base[i].gf
-      )
-        j++;
-      if (j - i === 1) {
-        ranked.push(base[i]);
-      } else {
-        breakH2H(base.slice(i, j).map((b) => b.id), played, elo).forEach((id) =>
-          ranked.push(base.find((b) => b.id === id))
-        );
-      }
+      while (j < byPoints.length && overall[byPoints[j]].pts === overall[byPoints[i]].pts) j++;
+      if (j - i === 1) order.push(byPoints[i]);
+      else order.push(...rankTied(byPoints.slice(i, j), overall, played, elo));
       i = j;
     }
+    const ranked = order.map((id) => ({
+      id,
+      pts: overall[id].pts,
+      gd: overall[id].gd,
+      gf: overall[id].gf,
+      w: stat[id].w,
+      d: stat[id].d,
+    }));
     groupRank[letter] = ranked;
     ranked.forEach((r, i) => {
       res[r.id].gw = r.w;
