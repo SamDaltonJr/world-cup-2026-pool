@@ -334,6 +334,198 @@ function liveTeamToId(code, name) {
   return null;
 }
 
+// ---------- ESPN live feed (client-side, keyless) ----------
+// Called directly from the browser on page load and every 30 s so live scores
+// update without waiting for the GitHub Action to run.
+
+const ESPN_SCOREBOARD =
+  "https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard";
+
+// Same canonicalization used in sync-results.mjs so team names match across providers.
+const ESPN_NAME_CANON = {
+  "korea republic": "korea",
+  "south korea": "korea",
+  czechia: "czech",
+  "czech republic": "czech",
+  turkiye: "turkey",
+  turkey: "turkey",
+  "united states": "usa",
+  usa: "usa",
+  "ivory coast": "ivory coast",
+  "cote divoire": "ivory coast",
+  "cape verde": "cape verde",
+  "cabo verde": "cape verde",
+  "dr congo": "congo",
+  "congo dr": "congo",
+  "democratic republic of the congo": "congo",
+  "bosnia and herzegovina": "bosnia",
+  "bosnia herzegovina": "bosnia",
+  "ir iran": "iran",
+};
+
+function espnCanon(name) {
+  const n = (name || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .replace(/[^a-z ]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return ESPN_NAME_CANON[n] || n;
+}
+
+function espnMatchKey(homeName, awayName, dateIso) {
+  const day = (dateIso || "").slice(0, 10);
+  return [espnCanon(homeName), espnCanon(awayName)].sort().join("|") + "@" + day;
+}
+
+// Fetch live (in-progress) and just-finished (post) matches from ESPN's
+// public scoreboard. "post" matches become provisional FINISHED results so the
+// app shows the final score immediately without waiting for the GitHub Action.
+async function fetchEspnScores() {
+  const res = await fetch(ESPN_SCOREBOARD);
+  if (!res.ok) throw new Error(`ESPN ${res.status}`);
+  const j = await res.json();
+  const out = [];
+  for (const ev of j.events || []) {
+    const comp = (ev.competitions && ev.competitions[0]) || null;
+    const status = (comp && comp.status) || ev.status || null;
+    const type = status && status.type;
+    if (!comp || !type) continue;
+    const state = type.state; // "pre" | "in" | "post"
+    if (state !== "in" && state !== "post") continue;
+    const competitors = comp.competitors || [];
+    const home = competitors.find((c) => c.homeAway === "home");
+    const away = competitors.find((c) => c.homeAway === "away");
+    if (!home || !away) continue;
+    const teamName = (c) => (c.team && (c.team.displayName || c.team.name)) || null;
+    const toScore = (s) => (s == null || s === "" ? null : Number(s));
+    if (state === "post") {
+      out.push({
+        home: teamName(home),
+        away: teamName(away),
+        date: ev.date,
+        homeScore: toScore(home.score),
+        awayScore: toScore(away.score),
+        minute: null,
+        status: "FINISHED",
+        _espnProvisional: true,
+      });
+    } else {
+      const label = (type.name || "") + " " + (type.description || "");
+      const paused = /half.?time|HT/i.test(label);
+      const clockMatch = /(\d+)/.exec((status && status.displayClock) || "");
+      out.push({
+        home: teamName(home),
+        away: teamName(away),
+        date: ev.date,
+        homeScore: toScore(home.score),
+        awayScore: toScore(away.score),
+        minute: paused ? null : clockMatch ? Number(clockMatch[1]) : null,
+        status: paused ? "PAUSED" : "IN_PLAY",
+      });
+    }
+  }
+  return out;
+}
+
+// Overlay ESPN scores onto the base matches from Supabase.
+// Official FINISHED results from football-data are never overwritten; ESPN
+// provisional finals fill in the gap until the Action catches up.
+function applyEspnOverlay(baseMatches, espnScores) {
+  if (!espnScores || !espnScores.length) return baseMatches;
+  const byKey = {};
+  for (const lv of espnScores)
+    byKey[espnMatchKey(lv.home, lv.away, lv.date)] = lv;
+  return baseMatches.map((m) => {
+    // Keep official FINISHED from football-data; re-apply ESPN provisional if
+    // that's all we have (so a fresh Supabase poll doesn't blank the score).
+    if (m.status === "FINISHED" && !m._espnProvisional) return m;
+    const key = espnMatchKey(m.home && m.home.name, m.away && m.away.name, m.utcDate);
+    const lv = byKey[key];
+    if (!lv) return m;
+    if (lv.status === "FINISHED") {
+      return { ...m, status: "FINISHED", homeScore: lv.homeScore, awayScore: lv.awayScore, minute: null, _espnProvisional: true };
+    }
+    return { ...m, status: lv.status, homeScore: lv.homeScore, awayScore: lv.awayScore, minute: lv.minute, _live: true };
+  });
+}
+
+// Derive group standings from the match data already in the live feed.
+// This runs entirely in the browser so the table updates as soon as ESPN
+// reports a result, without waiting for the GitHub Action.
+// Tiebreaker order matches FIFA 2026: h2h points → h2h GD → h2h GF →
+// overall GD → overall GF.
+function deriveStandings(matches) {
+  const groups = {};
+  for (const m of matches) {
+    if (!m.group || m.stage !== "GROUP_STAGE") continue;
+    const g = m.group.replace(/^GROUP_?/, "");
+    if (!groups[g]) groups[g] = { teams: {}, played: [] };
+    const grp = groups[g];
+    for (const side of [m.home, m.away]) {
+      if (side && side.name && !grp.teams[side.name])
+        grp.teams[side.name] = { code: side.code, name: side.name, crest: side.crest, played: 0, won: 0, draw: 0, lost: 0, gf: 0, ga: 0, points: 0 };
+    }
+    if (m.status === "FINISHED" && m.homeScore != null && m.awayScore != null && m.home && m.away) {
+      const h = grp.teams[m.home.name], a = grp.teams[m.away.name];
+      if (h && a) {
+        h.played++; a.played++;
+        h.gf += m.homeScore; h.ga += m.awayScore;
+        a.gf += m.awayScore; a.ga += m.homeScore;
+        if (m.homeScore > m.awayScore) { h.won++; h.points += 3; a.lost++; }
+        else if (m.homeScore < m.awayScore) { a.won++; a.points += 3; h.lost++; }
+        else { h.draw++; a.draw++; h.points++; a.points++; }
+        grp.played.push({ hN: m.home.name, aN: m.away.name, gh: m.homeScore, ga: m.awayScore });
+      }
+    }
+  }
+  return Object.entries(groups)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([g, grp]) => ({
+      group: g,
+      table: _sortGroupTable(Object.values(grp.teams), grp.played).map((t, i) => ({
+        position: i + 1, code: t.code, name: t.name, crest: t.crest,
+        played: t.played, won: t.won, draw: t.draw, lost: t.lost,
+        gf: t.gf, ga: t.ga, gd: t.gf - t.ga, points: t.points,
+      })),
+    }));
+}
+
+function _sortGroupTable(teams, played) {
+  const byPts = [...teams].sort((a, b) => b.points - a.points);
+  const out = [];
+  let i = 0;
+  while (i < byPts.length) {
+    let j = i + 1;
+    while (j < byPts.length && byPts[j].points === byPts[i].points) j++;
+    out.push(...(j - i === 1 ? [byPts[i]] : _breakTie(byPts.slice(i, j), played)));
+    i = j;
+  }
+  return out;
+}
+
+function _breakTie(tied, played) {
+  const names = new Set(tied.map((t) => t.name));
+  const h = {};
+  tied.forEach((t) => (h[t.name] = { pts: 0, gf: 0, ga: 0 }));
+  for (const m of played) {
+    if (!names.has(m.hN) || !names.has(m.aN)) continue;
+    h[m.hN].gf += m.gh; h[m.hN].ga += m.ga;
+    h[m.aN].gf += m.ga; h[m.aN].ga += m.gh;
+    if (m.gh > m.ga) h[m.hN].pts += 3;
+    else if (m.gh < m.ga) h[m.aN].pts += 3;
+    else { h[m.hN].pts++; h[m.aN].pts++; }
+  }
+  return [...tied].sort((x, y) =>
+    (h[y.name].pts - h[x.name].pts) ||
+    ((h[y.name].gf - h[y.name].ga) - (h[x.name].gf - h[x.name].ga)) ||
+    (h[y.name].gf - h[x.name].gf) ||
+    ((y.gf - y.ga) - (x.gf - x.ga)) ||
+    (y.gf - x.gf)
+  );
+}
+
 const STAGE_TO_KO = {
   LAST_32: "r32",
   ROUND_OF_32: "r32",
@@ -2881,13 +3073,15 @@ function GroupTable({ g }) {
 // Apply any in-progress group match onto the standings so the tables read live:
 // the provisional scoreline adds points/GD/GF to each side, the affected groups
 // re-sort, and every team currently playing is tagged `_live`. Groups with no
-// live match are returned untouched (preserving the feed's official tiebreaks).
-function liveStandings(live) {
-  const groups = ((live && live.standings) || []).map((g) => ({
+// live match are returned untouched (preserving deriveStandings' tiebreaks).
+// Builds on deriveStandings(matches) — the live-updated, finished-only base —
+// not live.standings, which is the stale Supabase snapshot.
+function liveStandings(matches) {
+  const groups = deriveStandings(matches).map((g) => ({
     group: g.group,
     table: (g.table || []).map((r) => ({ ...r })),
   }));
-  const inPlay = ((live && live.matches) || []).filter(
+  const inPlay = (matches || []).filter(
     (m) =>
       m.stage === "GROUP_STAGE" &&
       (m.status === "IN_PLAY" || m.status === "PAUSED") &&
@@ -3141,7 +3335,7 @@ function fmtGD(v, decimal) {
 function projThirdRace(proj, live) {
   if (!proj || !proj.groups || !proj.groups.length) return null;
   const playedById = {};
-  ((live && live.standings) || []).forEach((g) =>
+  deriveStandings((live && live.matches) || []).forEach((g) =>
     (g.table || []).forEach((r) => {
       const id = liveTeamToId(r.code, r.name);
       if (id) playedById[id] = r.played || 0;
@@ -3304,10 +3498,9 @@ function dayKeyOf(d) {
 
 function ResultsView({ live }) {
   const matches = (live && live.matches) || [];
-  // In-play group scores folded into the tables, sorted by group letter.
-  const standings = liveStandings(live)
-    .slice()
-    .sort((a, b) => (a.group || "").localeCompare(b.group || ""));
+  // deriveStandings gives the fresh finished-only base; liveStandings folds in
+  // any in-play group scores on top and flags teams that are currently playing.
+  const standings = useMemo(() => liveStandings(matches), [matches]);
 
   // Bucket matches into local calendar days, each sorted by kickoff time.
   const days = useMemo(() => {
@@ -3974,8 +4167,8 @@ export default function WorldCupTierPool() {
   }, []);
 
   // Poll the live feed so an open page picks up new scores without a reload.
-  // The poller refreshes Supabase every ~5 min; checking once a minute keeps the
-  // Results tab current with negligible load.
+  // The GitHub Action refreshes Supabase periodically; checking once a minute
+  // picks up schedule/standings/final-result updates.
   useEffect(() => {
     const t = setInterval(async () => {
       try {
@@ -3985,6 +4178,27 @@ export default function WorldCupTierPool() {
         // transient; try again next tick
       }
     }, 60000);
+    return () => clearInterval(t);
+  }, []);
+
+  // Poll ESPN directly from the browser every 30 s for live scores.
+  // This is faster and more reliable than waiting for the GitHub Action.
+  // ESPN's scoreboard is keyless and public with no CORS restrictions.
+  useEffect(() => {
+    async function pollEspn() {
+      try {
+        const espnLive = await fetchEspnScores();
+        setLive((prev) => {
+          if (!prev) return prev;
+          const merged = applyEspnOverlay(prev.matches || [], espnLive);
+          return { ...prev, matches: merged };
+        });
+      } catch (e) {
+        // transient; next tick will retry
+      }
+    }
+    pollEspn();
+    const t = setInterval(pollEspn, 30000);
     return () => clearInterval(t);
   }, []);
 
