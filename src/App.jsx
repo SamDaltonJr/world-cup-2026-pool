@@ -1802,7 +1802,7 @@ function MatchPredictionRow({ m }) {
 // A projected final group table: teams ranked by expected league points, with
 // the full odds of finishing in each spot 1–4. Each team's most-likely finish
 // is emphasized, and the two projected qualifiers are highlighted in emerald.
-function ProjGroupTable({ g }) {
+function ProjGroupTable({ g, liveIds }) {
   return (
     <div className="bg-white border border-stone-200 rounded-xl p-3 mb-3">
       <div className="text-xs font-bold text-stone-500 uppercase tracking-wide mb-1">
@@ -1847,6 +1847,7 @@ function ProjGroupTable({ g }) {
                   </span>
                   <Flag id={r.id} className="mr-1.5 align-[-2px]" />
                   {tm ? tm.name : r.id}
+                  {liveIds && liveIds.has(r.id) && <LiveBadge />}
                 </td>
                 <td className="text-center font-bold text-stone-800">
                   {r.projGroupPts.toFixed(1)}
@@ -2135,6 +2136,9 @@ function ForecastView({ live, locked, results }) {
   const [expanded, setExpanded] = useState(null); // expanded pool-entry name
   const [showAllMatches, setShowAllMatches] = useState(false);
   const [view, setView] = useState("cup"); // "cup" (tournament) | "pool"
+
+  // Teams in a live match right now, to flag them across the projection tables.
+  const liveIds = useMemo(() => liveTeamIds(live), [live]);
 
   const loadEntries = async () => {
     setLoadError("");
@@ -2620,11 +2624,13 @@ function ForecastView({ live, locked, results }) {
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-3">
                 {proj.groups.map((g) => (
-                  <ProjGroupTable key={g.group} g={g} />
+                  <ProjGroupTable key={g.group} g={g} liveIds={liveIds} />
                 ))}
               </div>
             </div>
           )}
+
+          {view === "cup" && <ProjThirdPlaceRace proj={proj} live={live} />}
 
           {/* Highest projected lineup (optimal by forecast points) */}
           {view === "pool" && projOptimal && (
@@ -2851,6 +2857,7 @@ function GroupTable({ g }) {
                   </span>
                   <Flag id={id} className="mr-1.5 align-[-2px]" />
                   {r.name}
+                  {r._live && <LiveBadge />}
                 </td>
                 <td className="text-center text-stone-600">{r.played}</td>
                 <td className="text-center text-stone-600">{r.won}</td>
@@ -2871,6 +2878,418 @@ function GroupTable({ g }) {
   );
 }
 
+// Apply any in-progress group match onto the standings so the tables read live:
+// the provisional scoreline adds points/GD/GF to each side, the affected groups
+// re-sort, and every team currently playing is tagged `_live`. Groups with no
+// live match are returned untouched (preserving the feed's official tiebreaks).
+function liveStandings(live) {
+  const groups = ((live && live.standings) || []).map((g) => ({
+    group: g.group,
+    table: (g.table || []).map((r) => ({ ...r })),
+  }));
+  const inPlay = ((live && live.matches) || []).filter(
+    (m) =>
+      m.stage === "GROUP_STAGE" &&
+      (m.status === "IN_PLAY" || m.status === "PAUSED") &&
+      m.homeScore != null &&
+      m.awayScore != null
+  );
+  if (inPlay.length === 0) return groups;
+
+  const touched = new Set();
+  const findRow = (team) => {
+    const id = liveTeamToId(team && team.code, team && team.name);
+    const code = (team && team.code) || null;
+    for (const g of groups) {
+      for (const r of g.table) {
+        if (
+          (id && liveTeamToId(r.code, r.name) === id) ||
+          (code && r.code === code)
+        )
+          return { g, r };
+      }
+    }
+    return null;
+  };
+
+  inPlay.forEach((m) => {
+    const applyDelta = (team, gf, ga) => {
+      const hit = findRow(team);
+      if (!hit) return;
+      const r = hit.r;
+      // Always flag a team that's currently in a live match so the table shows
+      // the badge — even once its group is mathematically decided.
+      r._live = true;
+      // Only fold the score into the table while the group game can still
+      // count. A side already on three games keeps its final standings (the
+      // live match is a post-group artifact — stale status, or a knockout the
+      // feed mislabels); applying a delta there would double-count it to four
+      // games played. The badge above still shows.
+      if ((r.played || 0) >= 3) return;
+      r.played = (r.played || 0) + 1;
+      r.gf = (r.gf || 0) + gf;
+      r.ga = (r.ga || 0) + ga;
+      r.gd = r.gf - r.ga;
+      if (gf > ga) {
+        r.won = (r.won || 0) + 1;
+        r.points = (r.points || 0) + 3;
+      } else if (gf < ga) {
+        r.lost = (r.lost || 0) + 1;
+      } else {
+        r.draw = (r.draw || 0) + 1;
+        r.points = (r.points || 0) + 1;
+      }
+      touched.add(hit.g.group);
+    };
+    applyDelta(m.home, m.homeScore, m.awayScore);
+    applyDelta(m.away, m.awayScore, m.homeScore);
+  });
+
+  groups.forEach((g) => {
+    if (!touched.has(g.group)) return;
+    g.table.sort(
+      (a, b) =>
+        (b.points || 0) - (a.points || 0) ||
+        (b.gd || 0) - (a.gd || 0) ||
+        (b.gf || 0) - (a.gf || 0) ||
+        (a.name || "").localeCompare(b.name || "")
+    );
+    g.table.forEach((r, i) => (r.position = i + 1));
+  });
+  return groups;
+}
+
+// Set of pool team ids that are in a match right now (in-play or paused), so
+// any view can flag them live regardless of how it sources its rows.
+function liveTeamIds(live) {
+  const ids = new Set();
+  ((live && live.matches) || []).forEach((m) => {
+    if (m.status !== "IN_PLAY" && m.status !== "PAUSED") return;
+    const h = liveTeamToId(m.home && m.home.code, m.home && m.home.name);
+    const a = liveTeamToId(m.away && m.away.code, m.away && m.away.name);
+    if (h) ids.add(h);
+    if (a) ids.add(a);
+  });
+  return ids;
+}
+
+// The pulsing "live" badge shown next to a team that's currently playing.
+function LiveBadge() {
+  return (
+    <span className="ml-1.5 inline-flex items-center gap-1 align-[1px]">
+      <span className="w-1.5 h-1.5 rounded-full bg-red-600 animate-pulse" />
+      <span className="text-[9px] font-bold uppercase tracking-wide text-red-600">
+        live
+      </span>
+    </span>
+  );
+}
+
+// Rank the 12 groups' current third-placed teams the way FIFA picks the eight
+// best to advance: points, then goal difference, then goals for. Takes a
+// standings array (position-3 row of each group). Returns null before any
+// third-placed team has kicked a ball — the order would just be noise.
+function thirdPlaceRace(standings) {
+  const rows = [];
+  (standings || []).forEach((g) => {
+    const r = (g.table || []).find((t) => t.position === 3);
+    if (!r) return;
+    rows.push({
+      id: liveTeamToId(r.code, r.name),
+      name: r.name,
+      code: r.code,
+      group: g.group,
+      played: r.played || 0,
+      won: r.won || 0,
+      draw: r.draw || 0,
+      lost: r.lost || 0,
+      gd: r.gd || 0,
+      gf: r.gf || 0,
+      points: r.points || 0,
+      live: !!r._live,
+    });
+  });
+  if (rows.length === 0 || rows.every((t) => t.played === 0)) return null;
+  rows.sort(
+    (a, b) =>
+      b.points - a.points ||
+      b.gd - a.gd ||
+      b.gf - a.gf ||
+      (a.name || "").localeCompare(b.name || "")
+  );
+  // The cross-group ranking is only apples-to-apples once every group has
+  // finished; until then teams have played differing numbers of games (and a
+  // team mid-match is still provisional).
+  const complete =
+    rows.length >= 12 && rows.every((t) => t.played >= 3 && !t.live);
+  return {
+    complete,
+    rows: rows.map((t, i) => ({ ...t, rank: i + 1, qualifies: i < 8 })),
+  };
+}
+
+// Live leaderboard of the third-placed teams, with the top-8 qualifying zone
+// marked. Shared by the Results and Projections tabs. Renders nothing until the
+// group stage is underway.
+function ThirdPlaceLeaderboard({ standings }) {
+  const race = thirdPlaceRace(standings);
+  if (!race) return null;
+  const { rows, complete } = race;
+  return (
+    <div className="bg-white border border-stone-200 rounded-xl p-3 mb-3">
+      <div className="flex items-baseline justify-between mb-1">
+        <div className="text-xs font-bold text-stone-500 uppercase tracking-wide">
+          Third-place race
+        </div>
+        <span className="text-[11px] text-stone-400">top 8 advance</span>
+      </div>
+      <table className="w-full text-sm">
+        <thead>
+          <tr className="text-[11px] text-stone-400">
+            <th className="text-left font-medium py-1">Team</th>
+            <th className="w-7 text-center font-medium">Grp</th>
+            <th className="w-6 text-center font-medium">P</th>
+            <th className="w-6 text-center font-medium">W</th>
+            <th className="w-6 text-center font-medium">D</th>
+            <th className="w-6 text-center font-medium">L</th>
+            <th className="w-8 text-center font-medium">GD</th>
+            <th className="w-7 text-center font-medium">Pts</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r, i) => {
+            const pooled = !!r.id;
+            const row = (
+              <tr
+                key={r.code || r.name}
+                className={
+                  "border-t border-stone-100 " +
+                  (r.qualifies ? "bg-emerald-50" : "")
+                }
+              >
+                <td
+                  className={
+                    "py-1 " +
+                    (pooled ? "font-bold text-emerald-900" : "text-stone-700")
+                  }
+                >
+                  <span
+                    className={
+                      "font-mono text-[11px] mr-1 inline-block w-4 text-right " +
+                      (r.qualifies ? "text-emerald-600" : "text-stone-300")
+                    }
+                  >
+                    {r.rank}
+                  </span>
+                  <Flag id={r.id} className="mr-1.5 align-[-2px]" />
+                  {r.name}
+                </td>
+                <td className="text-center font-mono text-[11px] text-stone-400">
+                  {r.group}
+                </td>
+                <td className="text-center text-stone-600">{r.played}</td>
+                <td className="text-center text-stone-600">{r.won}</td>
+                <td className="text-center text-stone-600">{r.draw}</td>
+                <td className="text-center text-stone-600">{r.lost}</td>
+                <td className="text-center text-stone-600">
+                  {r.gd > 0 ? "+" + r.gd : r.gd}
+                </td>
+                <td className="text-center font-bold text-stone-800">
+                  {r.points}
+                </td>
+              </tr>
+            );
+            // Dashed cutoff line between the 8th and 9th teams.
+            if (i === 7 && rows.length > 8) {
+              return [
+                row,
+                <tr key="cutoff">
+                  <td colSpan={8} className="px-0 pt-1">
+                    <div className="border-t-2 border-dashed border-emerald-300 text-[10px] font-semibold uppercase tracking-wide text-emerald-600 text-center pt-0.5">
+                      qualifying cutoff
+                    </div>
+                  </td>
+                </tr>,
+              ];
+            }
+            return row;
+          })}
+        </tbody>
+      </table>
+      <p className="text-[11px] text-stone-400 mt-2">
+        {complete
+          ? "The eight best third-placed teams advance to the Round of 32."
+          : "Provisional — teams have played differing numbers of games until every group finishes. Ranked by points, then goal difference, then goals for."}
+      </p>
+    </div>
+  );
+}
+
+// Format a projected goal difference: a decimal (e.g. +1.3) while a team still
+// has group games to play, a signed integer once its group is final.
+function fmtGD(v, decimal) {
+  if (v == null) return "—";
+  const n = decimal ? v.toFixed(1) : String(Math.round(v));
+  return v > 0 ? "+" + n : n;
+}
+
+// Projected version of the third-place race for the Projections tab. Each
+// group's projected third-placed team (3rd row of the simulated table) ranked
+// by its expected final group points then goal difference — both already blend
+// results so far with the simulated remaining games, so teams yet to finish
+// show fractional projections. `advance` is the chance of reaching the knockouts.
+function projThirdRace(proj, live) {
+  if (!proj || !proj.groups || !proj.groups.length) return null;
+  const playedById = {};
+  ((live && live.standings) || []).forEach((g) =>
+    (g.table || []).forEach((r) => {
+      const id = liveTeamToId(r.code, r.name);
+      if (id) playedById[id] = r.played || 0;
+    })
+  );
+  const rows = proj.groups
+    .map((g) => {
+      const r = g.table[2]; // projected 3rd place
+      if (!r) return null;
+      const tm = ALL_TEAMS[r.id];
+      return {
+        id: r.id,
+        name: tm ? tm.name : r.id,
+        group: g.group,
+        projPts: r.projGroupPts,
+        projGD: r.projGroupGD,
+        advance: r.advance,
+        played: playedById[r.id] ?? 0,
+      };
+    })
+    .filter(Boolean);
+  if (!rows.length) return null;
+  // Rank the FIFA way: projected points, then projected goal difference, then
+  // overall advance odds as a final separator.
+  rows.sort(
+    (a, b) =>
+      b.projPts - a.projPts || b.projGD - a.projGD || b.advance - a.advance
+  );
+  return rows.map((t, i) => ({ ...t, rank: i + 1, qualifies: i < 8 }));
+}
+
+function ProjThirdPlaceRace({ proj, live }) {
+  const rows = projThirdRace(proj, live);
+  if (!rows) return null;
+  const liveIds = liveTeamIds(live);
+  const anyProjected = rows.some((r) => r.played < 3);
+  return (
+    <div className="bg-white border border-stone-200 rounded-xl p-3 mb-4">
+      <div className="flex items-baseline justify-between mb-1">
+        <div className="text-xs font-bold text-stone-500 uppercase tracking-wide">
+          Projected third-place race
+        </div>
+        <span className="text-[11px] text-stone-400">top 8 advance</span>
+      </div>
+      <table className="w-full text-sm">
+        <thead>
+          <tr className="text-[11px] text-stone-400">
+            <th className="text-left font-medium py-1">Team</th>
+            <th className="w-7 text-center font-medium">Grp</th>
+            <th className="w-7 text-center font-medium" title="Group games played so far">
+              Pld
+            </th>
+            <th className="w-12 text-center font-medium" title="Projected final group points (results so far + simulated remaining games)">
+              Proj
+            </th>
+            <th className="w-11 text-center font-medium" title="Projected final group goal difference">
+              GD
+            </th>
+            <th className="w-10 text-center font-medium" title="Chance this team reaches the knockouts">
+              Adv
+            </th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r, i) => {
+            const pooled = ALL_TEAMS[r.id] && r.played != null;
+            const stillToPlay = r.played < 3;
+            const row = (
+              <tr
+                key={r.id}
+                className={
+                  "border-t border-stone-100 " +
+                  (r.qualifies ? "bg-emerald-50" : "")
+                }
+              >
+                <td
+                  className={
+                    "py-1 " +
+                    (pooled ? "font-bold text-emerald-900" : "text-stone-700")
+                  }
+                >
+                  <span
+                    className={
+                      "font-mono text-[11px] mr-1 inline-block w-4 text-right " +
+                      (r.qualifies ? "text-emerald-600" : "text-stone-300")
+                    }
+                  >
+                    {r.rank}
+                  </span>
+                  <Flag id={r.id} className="mr-1.5 align-[-2px]" />
+                  {r.name}
+                  {liveIds.has(r.id) && <LiveBadge />}
+                </td>
+                <td className="text-center font-mono text-[11px] text-stone-400">
+                  {r.group}
+                </td>
+                <td className="text-center font-mono text-[11px] text-stone-500">
+                  {r.played}
+                </td>
+                <td
+                  className={
+                    "text-center font-mono font-bold " +
+                    (stillToPlay ? "text-emerald-700" : "text-stone-800")
+                  }
+                  title={stillToPlay ? "Projected (games remaining)" : "Final"}
+                >
+                  {stillToPlay ? r.projPts.toFixed(1) : Math.round(r.projPts)}
+                </td>
+                <td
+                  className={
+                    "text-center font-mono text-[11px] " +
+                    (stillToPlay ? "text-emerald-700" : "text-stone-500")
+                  }
+                >
+                  {fmtGD(r.projGD, stillToPlay)}
+                </td>
+                <td className="text-center font-mono text-[11px] text-stone-500">
+                  {pct(r.advance)}
+                </td>
+              </tr>
+            );
+            if (i === 7 && rows.length > 8) {
+              return [
+                row,
+                <tr key="cutoff">
+                  <td colSpan={6} className="px-0 pt-1">
+                    <div className="border-t-2 border-dashed border-emerald-300 text-[10px] font-semibold uppercase tracking-wide text-emerald-600 text-center pt-0.5">
+                      qualifying cutoff
+                    </div>
+                  </td>
+                </tr>,
+              ];
+            }
+            return row;
+          })}
+        </tbody>
+      </table>
+      <p className="text-[11px] text-stone-400 mt-2">
+        Each group&apos;s projected third-placed team, ranked by projected final
+        group points, then goal difference.
+        {anyProjected
+          ? " Green values are projections for teams with group games still to play (Pld < 3); plain values are final."
+          : " All groups complete."}
+      </p>
+    </div>
+  );
+}
+
 // Local-calendar-day key (YYYY-MM-DD) for a match date, so matches group by the
 // viewer's day. Lexicographic order on these keys matches chronological order.
 function dayKeyOf(d) {
@@ -2885,7 +3304,8 @@ function dayKeyOf(d) {
 
 function ResultsView({ live }) {
   const matches = (live && live.matches) || [];
-  const standings = ((live && live.standings) || [])
+  // In-play group scores folded into the tables, sorted by group letter.
+  const standings = liveStandings(live)
     .slice()
     .sort((a, b) => (a.group || "").localeCompare(b.group || ""));
 
@@ -3040,6 +3460,11 @@ function ResultsView({ live }) {
               <GroupTable key={g.group} g={g} />
             ))}
           </div>
+
+          <div className="text-xs font-bold text-stone-400 uppercase tracking-wide mt-2 mb-2">
+            Third-place qualifying race
+          </div>
+          <ThirdPlaceLeaderboard standings={standings} />
         </>
       )}
 
