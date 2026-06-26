@@ -518,9 +518,9 @@ function _breakTie(tied, played) {
     else { h[m.hN].pts++; h[m.aN].pts++; }
   }
   return [...tied].sort((x, y) =>
-    (h[y].pts - h[x].pts) ||
-    ((h[y].gf - h[y].ga) - (h[x].gf - h[x].ga)) ||
-    (h[y].gf - h[x].gf) ||
+    (h[y.name].pts - h[x.name].pts) ||
+    ((h[y.name].gf - h[y.name].ga) - (h[x.name].gf - h[x.name].ga)) ||
+    (h[y.name].gf - h[x.name].gf) ||
     ((y.gf - y.ga) - (x.gf - x.ga)) ||
     (y.gf - x.gf)
   );
