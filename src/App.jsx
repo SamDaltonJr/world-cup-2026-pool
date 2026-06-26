@@ -379,7 +379,10 @@ function espnMatchKey(homeName, awayName, dateIso) {
   return [espnCanon(homeName), espnCanon(awayName)].sort().join("|") + "@" + day;
 }
 
-async function fetchEspnLive() {
+// Fetch live (in-progress) and just-finished (post) matches from ESPN's
+// public scoreboard. "post" matches become provisional FINISHED results so the
+// app shows the final score immediately without waiting for the GitHub Action.
+async function fetchEspnScores() {
   const res = await fetch(ESPN_SCOREBOARD);
   if (!res.ok) throw new Error(`ESPN ${res.status}`);
   const j = await res.json();
@@ -388,50 +391,139 @@ async function fetchEspnLive() {
     const comp = (ev.competitions && ev.competitions[0]) || null;
     const status = (comp && comp.status) || ev.status || null;
     const type = status && status.type;
-    if (!comp || !type || type.state !== "in") continue;
+    if (!comp || !type) continue;
+    const state = type.state; // "pre" | "in" | "post"
+    if (state !== "in" && state !== "post") continue;
     const competitors = comp.competitors || [];
     const home = competitors.find((c) => c.homeAway === "home");
     const away = competitors.find((c) => c.homeAway === "away");
     if (!home || !away) continue;
     const teamName = (c) => (c.team && (c.team.displayName || c.team.name)) || null;
     const toScore = (s) => (s == null || s === "" ? null : Number(s));
-    const label = (type.name || "") + " " + (type.description || "");
-    const paused = /half.?time|HT/i.test(label);
-    const clockMatch = /(\d+)/.exec((status && status.displayClock) || "");
-    out.push({
-      home: teamName(home),
-      away: teamName(away),
-      date: ev.date,
-      homeScore: toScore(home.score),
-      awayScore: toScore(away.score),
-      minute: paused ? null : clockMatch ? Number(clockMatch[1]) : null,
-      status: paused ? "PAUSED" : "IN_PLAY",
-    });
+    if (state === "post") {
+      out.push({
+        home: teamName(home),
+        away: teamName(away),
+        date: ev.date,
+        homeScore: toScore(home.score),
+        awayScore: toScore(away.score),
+        minute: null,
+        status: "FINISHED",
+        _espnProvisional: true,
+      });
+    } else {
+      const label = (type.name || "") + " " + (type.description || "");
+      const paused = /half.?time|HT/i.test(label);
+      const clockMatch = /(\d+)/.exec((status && status.displayClock) || "");
+      out.push({
+        home: teamName(home),
+        away: teamName(away),
+        date: ev.date,
+        homeScore: toScore(home.score),
+        awayScore: toScore(away.score),
+        minute: paused ? null : clockMatch ? Number(clockMatch[1]) : null,
+        status: paused ? "PAUSED" : "IN_PLAY",
+      });
+    }
   }
   return out;
 }
 
-// Overlay ESPN live scores onto the base matches from Supabase.
-// Official FINISHED results from football-data are never overwritten.
-function applyEspnOverlay(baseMatches, espnLive) {
-  if (!espnLive || !espnLive.length) return baseMatches;
+// Overlay ESPN scores onto the base matches from Supabase.
+// Official FINISHED results from football-data are never overwritten; ESPN
+// provisional finals fill in the gap until the Action catches up.
+function applyEspnOverlay(baseMatches, espnScores) {
+  if (!espnScores || !espnScores.length) return baseMatches;
   const byKey = {};
-  for (const lv of espnLive)
+  for (const lv of espnScores)
     byKey[espnMatchKey(lv.home, lv.away, lv.date)] = lv;
   return baseMatches.map((m) => {
-    if (m.status === "FINISHED") return m;
+    // Keep official FINISHED from football-data; re-apply ESPN provisional if
+    // that's all we have (so a fresh Supabase poll doesn't blank the score).
+    if (m.status === "FINISHED" && !m._espnProvisional) return m;
     const key = espnMatchKey(m.home && m.home.name, m.away && m.away.name, m.utcDate);
     const lv = byKey[key];
     if (!lv) return m;
-    return {
-      ...m,
-      status: lv.status,
-      homeScore: lv.homeScore,
-      awayScore: lv.awayScore,
-      minute: lv.minute,
-      _live: true,
-    };
+    if (lv.status === "FINISHED") {
+      return { ...m, status: "FINISHED", homeScore: lv.homeScore, awayScore: lv.awayScore, minute: null, _espnProvisional: true };
+    }
+    return { ...m, status: lv.status, homeScore: lv.homeScore, awayScore: lv.awayScore, minute: lv.minute, _live: true };
   });
+}
+
+// Derive group standings from the match data already in the live feed.
+// This runs entirely in the browser so the table updates as soon as ESPN
+// reports a result, without waiting for the GitHub Action.
+// Tiebreaker order matches FIFA 2026: h2h points → h2h GD → h2h GF →
+// overall GD → overall GF.
+function deriveStandings(matches) {
+  const groups = {};
+  for (const m of matches) {
+    if (!m.group || m.stage !== "GROUP_STAGE") continue;
+    const g = m.group.replace(/^GROUP_?/, "");
+    if (!groups[g]) groups[g] = { teams: {}, played: [] };
+    const grp = groups[g];
+    for (const side of [m.home, m.away]) {
+      if (side && side.name && !grp.teams[side.name])
+        grp.teams[side.name] = { code: side.code, name: side.name, crest: side.crest, played: 0, won: 0, draw: 0, lost: 0, gf: 0, ga: 0, points: 0 };
+    }
+    if (m.status === "FINISHED" && m.homeScore != null && m.awayScore != null && m.home && m.away) {
+      const h = grp.teams[m.home.name], a = grp.teams[m.away.name];
+      if (h && a) {
+        h.played++; a.played++;
+        h.gf += m.homeScore; h.ga += m.awayScore;
+        a.gf += m.awayScore; a.ga += m.homeScore;
+        if (m.homeScore > m.awayScore) { h.won++; h.points += 3; a.lost++; }
+        else if (m.homeScore < m.awayScore) { a.won++; a.points += 3; h.lost++; }
+        else { h.draw++; a.draw++; h.points++; a.points++; }
+        grp.played.push({ hN: m.home.name, aN: m.away.name, gh: m.homeScore, ga: m.awayScore });
+      }
+    }
+  }
+  return Object.entries(groups)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([g, grp]) => ({
+      group: g,
+      table: _sortGroupTable(Object.values(grp.teams), grp.played).map((t, i) => ({
+        position: i + 1, code: t.code, name: t.name, crest: t.crest,
+        played: t.played, won: t.won, draw: t.draw, lost: t.lost,
+        gf: t.gf, ga: t.ga, gd: t.gf - t.ga, points: t.points,
+      })),
+    }));
+}
+
+function _sortGroupTable(teams, played) {
+  const byPts = [...teams].sort((a, b) => b.points - a.points);
+  const out = [];
+  let i = 0;
+  while (i < byPts.length) {
+    let j = i + 1;
+    while (j < byPts.length && byPts[j].points === byPts[i].points) j++;
+    out.push(...(j - i === 1 ? [byPts[i]] : _breakTie(byPts.slice(i, j), played)));
+    i = j;
+  }
+  return out;
+}
+
+function _breakTie(tied, played) {
+  const names = new Set(tied.map((t) => t.name));
+  const h = {};
+  tied.forEach((t) => (h[t.name] = { pts: 0, gf: 0, ga: 0 }));
+  for (const m of played) {
+    if (!names.has(m.hN) || !names.has(m.aN)) continue;
+    h[m.hN].gf += m.gh; h[m.hN].ga += m.ga;
+    h[m.aN].gf += m.ga; h[m.aN].ga += m.gh;
+    if (m.gh > m.ga) h[m.hN].pts += 3;
+    else if (m.gh < m.ga) h[m.aN].pts += 3;
+    else { h[m.hN].pts++; h[m.aN].pts++; }
+  }
+  return [...tied].sort((x, y) =>
+    (h[y].pts - h[x].pts) ||
+    ((h[y].gf - h[y].ga) - (h[x].gf - h[x].ga)) ||
+    (h[y].gf - h[x].gf) ||
+    ((y.gf - y.ga) - (x.gf - x.ga)) ||
+    (y.gf - x.gf)
+  );
 }
 
 const STAGE_TO_KO = {
@@ -2985,9 +3077,7 @@ function dayKeyOf(d) {
 
 function ResultsView({ live }) {
   const matches = (live && live.matches) || [];
-  const standings = ((live && live.standings) || [])
-    .slice()
-    .sort((a, b) => (a.group || "").localeCompare(b.group || ""));
+  const standings = useMemo(() => deriveStandings(matches), [matches]);
 
   // Bucket matches into local calendar days, each sorted by kickoff time.
   const days = useMemo(() => {
@@ -3669,7 +3759,7 @@ export default function WorldCupTierPool() {
   useEffect(() => {
     async function pollEspn() {
       try {
-        const espnLive = await fetchEspnLive();
+        const espnLive = await fetchEspnScores();
         setLive((prev) => {
           if (!prev) return prev;
           const merged = applyEspnOverlay(prev.matches || [], espnLive);
