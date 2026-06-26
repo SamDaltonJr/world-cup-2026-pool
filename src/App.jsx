@@ -334,6 +334,106 @@ function liveTeamToId(code, name) {
   return null;
 }
 
+// ---------- ESPN live feed (client-side, keyless) ----------
+// Called directly from the browser on page load and every 30 s so live scores
+// update without waiting for the GitHub Action to run.
+
+const ESPN_SCOREBOARD =
+  "https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard";
+
+// Same canonicalization used in sync-results.mjs so team names match across providers.
+const ESPN_NAME_CANON = {
+  "korea republic": "korea",
+  "south korea": "korea",
+  czechia: "czech",
+  "czech republic": "czech",
+  turkiye: "turkey",
+  turkey: "turkey",
+  "united states": "usa",
+  usa: "usa",
+  "ivory coast": "ivory coast",
+  "cote divoire": "ivory coast",
+  "cape verde": "cape verde",
+  "cabo verde": "cape verde",
+  "dr congo": "congo",
+  "congo dr": "congo",
+  "democratic republic of the congo": "congo",
+  "bosnia and herzegovina": "bosnia",
+  "bosnia herzegovina": "bosnia",
+  "ir iran": "iran",
+};
+
+function espnCanon(name) {
+  const n = (name || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .replace(/[^a-z ]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return ESPN_NAME_CANON[n] || n;
+}
+
+function espnMatchKey(homeName, awayName, dateIso) {
+  const day = (dateIso || "").slice(0, 10);
+  return [espnCanon(homeName), espnCanon(awayName)].sort().join("|") + "@" + day;
+}
+
+async function fetchEspnLive() {
+  const res = await fetch(ESPN_SCOREBOARD);
+  if (!res.ok) throw new Error(`ESPN ${res.status}`);
+  const j = await res.json();
+  const out = [];
+  for (const ev of j.events || []) {
+    const comp = (ev.competitions && ev.competitions[0]) || null;
+    const status = (comp && comp.status) || ev.status || null;
+    const type = status && status.type;
+    if (!comp || !type || type.state !== "in") continue;
+    const competitors = comp.competitors || [];
+    const home = competitors.find((c) => c.homeAway === "home");
+    const away = competitors.find((c) => c.homeAway === "away");
+    if (!home || !away) continue;
+    const teamName = (c) => (c.team && (c.team.displayName || c.team.name)) || null;
+    const toScore = (s) => (s == null || s === "" ? null : Number(s));
+    const label = (type.name || "") + " " + (type.description || "");
+    const paused = /half.?time|HT/i.test(label);
+    const clockMatch = /(\d+)/.exec((status && status.displayClock) || "");
+    out.push({
+      home: teamName(home),
+      away: teamName(away),
+      date: ev.date,
+      homeScore: toScore(home.score),
+      awayScore: toScore(away.score),
+      minute: paused ? null : clockMatch ? Number(clockMatch[1]) : null,
+      status: paused ? "PAUSED" : "IN_PLAY",
+    });
+  }
+  return out;
+}
+
+// Overlay ESPN live scores onto the base matches from Supabase.
+// Official FINISHED results from football-data are never overwritten.
+function applyEspnOverlay(baseMatches, espnLive) {
+  if (!espnLive || !espnLive.length) return baseMatches;
+  const byKey = {};
+  for (const lv of espnLive)
+    byKey[espnMatchKey(lv.home, lv.away, lv.date)] = lv;
+  return baseMatches.map((m) => {
+    if (m.status === "FINISHED") return m;
+    const key = espnMatchKey(m.home && m.home.name, m.away && m.away.name, m.utcDate);
+    const lv = byKey[key];
+    if (!lv) return m;
+    return {
+      ...m,
+      status: lv.status,
+      homeScore: lv.homeScore,
+      awayScore: lv.awayScore,
+      minute: lv.minute,
+      _live: true,
+    };
+  });
+}
+
 const STAGE_TO_KO = {
   LAST_32: "r32",
   ROUND_OF_32: "r32",
@@ -3549,8 +3649,8 @@ export default function WorldCupTierPool() {
   }, []);
 
   // Poll the live feed so an open page picks up new scores without a reload.
-  // The poller refreshes Supabase every ~5 min; checking once a minute keeps the
-  // Results tab current with negligible load.
+  // The GitHub Action refreshes Supabase periodically; checking once a minute
+  // picks up schedule/standings/final-result updates.
   useEffect(() => {
     const t = setInterval(async () => {
       try {
@@ -3560,6 +3660,27 @@ export default function WorldCupTierPool() {
         // transient; try again next tick
       }
     }, 60000);
+    return () => clearInterval(t);
+  }, []);
+
+  // Poll ESPN directly from the browser every 30 s for live scores.
+  // This is faster and more reliable than waiting for the GitHub Action.
+  // ESPN's scoreboard is keyless and public with no CORS restrictions.
+  useEffect(() => {
+    async function pollEspn() {
+      try {
+        const espnLive = await fetchEspnLive();
+        setLive((prev) => {
+          if (!prev) return prev;
+          const merged = applyEspnOverlay(prev.matches || [], espnLive);
+          return { ...prev, matches: merged };
+        });
+      } catch (e) {
+        // transient; next tick will retry
+      }
+    }
+    pollEspn();
+    const t = setInterval(pollEspn, 30000);
     return () => clearInterval(t);
   }, []);
 
