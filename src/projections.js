@@ -472,7 +472,9 @@ function koDecide(elo, idA, idB, koResults) {
 // returns nothing else; callers score and aggregate from `res`.
 function simulateOnce(elo, groups, koResults, teamIds, bracketAcc) {
   const res = {};
-  teamIds.forEach((id) => (res[id] = { gw: 0, gd: 0, finish: "out", ko: {} }));
+  teamIds.forEach(
+    (id) => (res[id] = { gw: 0, gd: 0, ggd: 0, finish: "out", ko: {} })
+  );
 
   // Optionally tally, per knockout match, which team filled each seat and who
   // advanced — accumulated across sims into per-slot occupancy probabilities.
@@ -540,6 +542,7 @@ function simulateOnce(elo, groups, koResults, teamIds, bracketAcc) {
     ranked.forEach((r, i) => {
       res[r.id].gw = r.w;
       res[r.id].gd = r.d;
+      res[r.id].ggd = r.gd; // group goal difference (r.gd here is gf - ga)
       res[r.id].pos = i + 1; // raw group finishing position 1–4
       if (i === 0) res[r.id].finish = "winner";
       else if (i === 1) res[r.id].finish = "runnerup";
@@ -703,6 +706,7 @@ export function projectTournament(opts) {
       (acc[id] = {
         groupWinner: 0, runnerUp: 0, pos3: 0, pos4: 0, advance: 0,
         r16: 0, qf: 0, sf: 0, final: 0, champ: 0, ptsSum: 0, glPtsSum: 0,
+        ggdSum: 0,
       })
   );
   // Per-entry accumulators.
@@ -726,6 +730,7 @@ export function projectTournament(opts) {
       if (r.finish === "winner" || r.finish === "runnerup" || r.finish === "third")
         a.advance++;
       a.glPtsSum += 3 * (r.gw || 0) + (r.gd || 0); // group league points (0–9)
+      a.ggdSum += r.ggd || 0; // group goal difference
       if (r.ko.r32) a.r16++; // won R32 => reached R16
       if (r.ko.r16) a.qf++;
       if (r.ko.qf) a.sf++;
@@ -766,6 +771,7 @@ export function projectTournament(opts) {
       champ: a.champ / sims,
       projPts: a.ptsSum / sims,
       projGroupPts: a.glPtsSum / sims, // expected final group league points
+      projGroupGD: a.ggdSum / sims, // expected final group goal difference
       elo: Math.round(elo[id]), // current rating, after played-match updates
       eloBase: TEAM_ELO[id], // pre-tournament snapshot, for the delta
     };
