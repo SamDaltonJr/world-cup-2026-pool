@@ -1,5 +1,5 @@
 // ============================================================
-// Live results sync  ·  football-data.org (+ api-football live)  ->  Supabase
+// Live results sync  ·  football-data.org (+ ESPN live)  ->  Supabase
 // ------------------------------------------------------------
 // Runs in GitHub Actions on a schedule (see
 // .github/workflows/sync-results.yml). It builds a single `live` row in the
@@ -7,14 +7,19 @@
 //
 //   • football-data.org  - the base: full schedule, group standings, and the
 //     official final results. (Its free tier does NOT update in-play scores.)
-//   • api-football (API-Sports) - overlays LIVE in-play scores during matches
-//     via /fixtures?live=all. Its free tier blocks 2026 standings/fixtures but
-//     allows the live endpoint, so we use it ONLY for live scores.
+//   • ESPN scoreboard (unofficial, keyless) - overlays LIVE in-play scores
+//     during matches via its public soccer/fifa.world scoreboard endpoint. No
+//     API key, no account, no daily request cap.
 //
-// To respect api-football's 100-requests/day free cap, the live call only runs
-// when a match is in its kickoff window AND on ~10-minute boundaries. When a
-// match finishes it drops off the live feed, so we carry its last live score
-// forward until football-data posts the official final.
+// The live call runs on every scheduled run that has a match in its kickoff
+// window. When a match finishes it drops off ESPN's "in"-state list, so we
+// carry its last live score forward until football-data posts the official
+// final.
+//
+// (Previously the live overlay used api-football / API-Sports, but its free
+// tier required an account that could be suspended and capped us at 100
+// requests/day. The api-football fetch is kept below, commented out, as a
+// drop-in fallback if you ever want to switch back.)
 //
 // The frontend never calls these APIs directly (that would leak keys and hit
 // CORS); this script holds the keys server-side and writes to Supabase.
@@ -23,10 +28,7 @@
 //   FOOTBALL_DATA_TOKEN  - free token from https://www.football-data.org/
 //   SUPABASE_URL         - Supabase project URL (same as VITE_SUPABASE_URL)
 //   SUPABASE_ANON_KEY    - Supabase anon key    (same as VITE_SUPABASE_ANON_KEY)
-// Optional env:
-//   APISPORTS_KEY        - free key from https://dashboard.api-football.com/
-//                          (omit it and the app still works, just without live
-//                          in-play scores)
+// (ESPN live scores need no key, so there's no live-source secret anymore.)
 //
 // Node 20+ (global fetch). No npm dependencies.
 // ============================================================
@@ -34,12 +36,12 @@
 const FOOTBALL_DATA_TOKEN = process.env.FOOTBALL_DATA_TOKEN;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
-const APISPORTS_KEY = process.env.APISPORTS_KEY;
 
 const COMPETITION = "WC"; // football-data code for the FIFA World Cup
 const API_BASE = "https://api.football-data.org/v4";
-const AF_BASE = "https://v3.football.api-sports.io";
-const AF_WC_LEAGUE = 1; // api-football league id for the World Cup
+// ESPN's free, keyless scoreboard for the FIFA World Cup.
+const ESPN_SCOREBOARD =
+  "https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard";
 
 // How long to keep showing a finished match's last live score before
 // football-data's official final is expected to take over.
@@ -67,6 +69,13 @@ async function apiGet(path) {
   return res.json();
 }
 
+// football-data usually reports in-progress matches as IN_PLAY/PAUSED, but the
+// matches feed sometimes uses the bare "LIVE" status. Map it onto IN_PLAY so the
+// app's in-play filters (which key on IN_PLAY/PAUSED) recognize it.
+function normStatus(s) {
+  return s === "LIVE" ? "IN_PLAY" : s;
+}
+
 function normWinner(w) {
   if (w === "HOME_TEAM") return "HOME";
   if (w === "AWAY_TEAM") return "AWAY";
@@ -88,7 +97,7 @@ async function fetchFromFootballData() {
   const matches = (matchesRes.matches || []).map((m) => ({
     id: m.id,
     utcDate: m.utcDate,
-    status: m.status, // SCHEDULED | TIMED | IN_PLAY | PAUSED | FINISHED | ...
+    status: normStatus(m.status), // SCHEDULED | TIMED | IN_PLAY | PAUSED | FINISHED | ...
     stage: m.stage, // GROUP_STAGE | LAST_32 | LAST_16 | QUARTER_FINALS | ...
     group: m.group || null,
     matchday: m.matchday ?? null,
@@ -137,11 +146,88 @@ async function fetchScorers() {
   }));
 }
 
-// ---------- api-football (live in-play scores only) ----------
+// ---------- ESPN (live in-play scores only) ----------
 
-// Canonicalize a country name so football-data's and api-football's spellings
-// land on the same key. Only the divergent ones need entries; the rest match
-// after accent/case stripping.
+// Pull every World Cup fixture ESPN currently lists and keep only the ones in
+// progress (status state "in"). Returns the same shape the merge step expects:
+// { home, away, date, homeScore, awayScore, minute, status }. Finished matches
+// are ignored here — football-data's official final is the authority for those.
+async function fetchLiveScores() {
+  const res = await fetch(ESPN_SCOREBOARD);
+  if (!res.ok) throw new Error(`ESPN -> ${res.status} ${res.statusText}`);
+  const j = await res.json();
+
+  const out = [];
+  for (const ev of j.events || []) {
+    const comp = (ev.competitions && ev.competitions[0]) || null;
+    const status = (comp && comp.status) || ev.status || null;
+    const type = status && status.type;
+    // state: "pre" (scheduled) | "in" (live) | "post" (finished).
+    if (!comp || !type || type.state !== "in") continue;
+
+    const competitors = comp.competitors || [];
+    const home = competitors.find((c) => c.homeAway === "home");
+    const away = competitors.find((c) => c.homeAway === "away");
+    if (!home || !away) continue;
+
+    const teamName = (c) =>
+      (c.team && (c.team.displayName || c.team.name)) || null;
+    const toScore = (s) => (s == null || s === "" ? null : Number(s));
+
+    // ESPN flags the interval with a halftime status; treat that as PAUSED and
+    // everything else in-play. displayClock looks like "67'" — grab the minute.
+    const label = (type.name || "") + " " + (type.description || "");
+    const paused = /half ?time|HT/i.test(label);
+    const clockMatch = /(\d+)/.exec((status && status.displayClock) || "");
+
+    out.push({
+      home: teamName(home),
+      away: teamName(away),
+      date: ev.date,
+      homeScore: toScore(home.score),
+      awayScore: toScore(away.score),
+      minute: paused ? null : clockMatch ? Number(clockMatch[1]) : null,
+      status: paused ? "PAUSED" : "IN_PLAY",
+    });
+  }
+  return out;
+}
+
+// ---------- api-football (DISABLED fallback live source) ----------
+// Kept for reference: swap this in for the ESPN fetchLiveScores above if you
+// ever restore an api-football account. Needs APISPORTS_KEY + the AF_BASE /
+// AF_WC_LEAGUE constants, and re-add the inWindow throttle in main() (its free
+// tier caps at 100 requests/day).
+//
+// const AF_BASE = "https://v3.football.api-sports.io";
+// const AF_WC_LEAGUE = 1; // api-football league id for the World Cup
+//
+// async function fetchLiveScoresApiFootball() {
+//   const res = await fetch(`${AF_BASE}/fixtures?live=all`, {
+//     headers: { "x-apisports-key": process.env.APISPORTS_KEY },
+//   });
+//   if (!res.ok) throw new Error(`api-football -> ${res.status} ${res.statusText}`);
+//   const j = await res.json();
+//   const errs = j.errors;
+//   if (errs && (Array.isArray(errs) ? errs.length : Object.keys(errs).length))
+//     throw new Error("api-football errors: " + JSON.stringify(errs));
+//   const PAUSED = new Set(["HT", "BT"]); // half-time / break time
+//   return (j.response || [])
+//     .filter((f) => f.league && f.league.id === AF_WC_LEAGUE)
+//     .map((f) => ({
+//       home: f.teams?.home?.name,
+//       away: f.teams?.away?.name,
+//       date: f.fixture?.date,
+//       homeScore: f.goals?.home ?? null,
+//       awayScore: f.goals?.away ?? null,
+//       minute: f.fixture?.status?.elapsed ?? null,
+//       status: PAUSED.has(f.fixture?.status?.short) ? "PAUSED" : "IN_PLAY",
+//     }));
+// }
+
+// Canonicalize a country name so football-data's and ESPN's spellings land on
+// the same key. Only the divergent ones need entries; the rest match after
+// accent/case stripping.
 const NAME_CANON = {
   "korea republic": "korea",
   "south korea": "korea",
@@ -179,29 +265,6 @@ function canon(name) {
 function matchKey(homeName, awayName, dateIso) {
   const day = (dateIso || "").slice(0, 10);
   return [canon(homeName), canon(awayName)].sort().join("|") + "@" + day;
-}
-
-async function fetchLiveScores() {
-  const res = await fetch(`${AF_BASE}/fixtures?live=all`, {
-    headers: { "x-apisports-key": APISPORTS_KEY },
-  });
-  if (!res.ok) throw new Error(`api-football -> ${res.status} ${res.statusText}`);
-  const j = await res.json();
-  const errs = j.errors;
-  if (errs && (Array.isArray(errs) ? errs.length : Object.keys(errs).length))
-    throw new Error("api-football errors: " + JSON.stringify(errs));
-  const PAUSED = new Set(["HT", "BT"]); // half-time / break time
-  return (j.response || [])
-    .filter((f) => f.league && f.league.id === AF_WC_LEAGUE)
-    .map((f) => ({
-      home: f.teams?.home?.name,
-      away: f.teams?.away?.name,
-      date: f.fixture?.date,
-      homeScore: f.goals?.home ?? null,
-      awayScore: f.goals?.away ?? null,
-      minute: f.fixture?.status?.elapsed ?? null,
-      status: PAUSED.has(f.fixture?.status?.short) ? "PAUSED" : "IN_PLAY",
-    }));
 }
 
 // Overlay live scores (and carried-forward finals) onto the football-data
@@ -326,24 +389,18 @@ async function main() {
     console.error("sync-results: scorers fetch failed:", e.message);
   }
 
-  // Only spend an api-football call when a match is plausibly in progress, and
-  // no more than once per ~15 minutes, to stay comfortably under the free
-  // 100/day cap. (Busiest day of the tournament is 5 spread-out matches ≈ 55
-  // calls at this cadence.) The throttle is based on the last fetch timestamp
-  // (not the clock minute) so a jittery GitHub cron run doesn't skip the window.
+  // Only poll the live feed when a match is plausibly in progress (kickoff
+  // window). ESPN is free and keyless with no daily cap, so unlike the old
+  // api-football path there's no throttle — every in-window run fetches.
   const now = Date.now();
   const inWindow = fdMatches.some((m) => {
     const ko = new Date(m.utcDate).getTime();
     return now >= ko - 5 * 60000 && now <= ko + 150 * 60000;
   });
-  const lastFetch = prev && prev.liveFetchedAt
-    ? new Date(prev.liveFetchedAt).getTime()
-    : 0;
-  const throttleOk = now - lastFetch >= 14 * 60000;
 
   let liveList = [];
   let fetchedLive = false;
-  if (APISPORTS_KEY && inWindow && throttleOk) {
+  if (inWindow) {
     try {
       liveList = await fetchLiveScores();
       fetchedLive = true;
@@ -362,13 +419,11 @@ async function main() {
   const liveCount = matches.filter((m) => m._live).length;
   const payload = {
     updatedAt: new Date().toISOString(),
-    // Preserve the last live-fetch time so the throttle survives across runs.
+    // Timestamp of the last successful live poll (informational).
     liveFetchedAt: fetchedLive
       ? new Date().toISOString()
       : (prev && prev.liveFetchedAt) || null,
-    source: APISPORTS_KEY
-      ? "football-data.org + api-football (live)"
-      : "football-data.org",
+    source: "football-data.org + ESPN (live)",
     matches,
     standings,
     scorers,
