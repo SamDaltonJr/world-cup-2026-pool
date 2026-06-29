@@ -3036,37 +3036,54 @@ function KnockoutMatchCard({ m }) {
   );
 }
 
-// Official FIFA 2026 bracket slot order (ESPN event IDs, top-to-bottom per round).
-// ESPN labels R32 slots by official FIFA match number (73-88), NOT by event-ID
-// order — so the event IDs below are NOT sequential. Tree verified against the
-// ESPN summary API topology and Wikipedia's R16 connectivity.
-// Ordered top-to-bottom by official FIFA match number (ESPN's bracket convention:
-// the lower-numbered R16 match sits on top of each branch, so M89/Germany leads).
-// R16 pairings (adjacent R32 slots meet here):
-//   M89 GER/PAR vs FRA/SWE, M90 RSA/CAN vs NED/MAR → QF M97 ┐
-//   M93 POR/CRO vs ESP/AUT, M94 USA/BIH vs BEL/SEN → QF M98 ┴ SF1
-//   M91 BRA/JPN vs CIV/NOR, M92 MEX/ECU vs ENG/COD → QF M99 ┐
-//   M95 ARG/CPV vs AUS/EGY, M96 SUI/ALG vs COL/GHA → QF M100┴ SF2
-const BRACKET_SLOT_ORDER = {
-  r32: ["760489","760492","760486","760488",  // GER/PAR, FRA/SWE, RSA/CAN, NED/MAR → QF M97 ┐
-        "760496","760497","760494","760493",  // POR/CRO, ESP/AUT, USA/BIH, BEL/SEN → QF M98 ┴ SF1
-        "760487","760490","760491","760495",  // BRA/JPN, CIV/NOR, MEX/ECU, ENG/COD → QF M99 ┐
-        "760500","760499","760498","760501"], // ARG/CPV, AUS/EGY, SUI/ALG, COL/GHA → QF M100┴ SF2
-  r16: ["760503","760502","760506","760507","760504","760505","760509","760508"],
-  qf:  ["760510","760511","760512","760513"],
-  sf:  ["760514","760515"],
-  f:   ["760517"],
-};
+// Official FIFA 2026 bracket, keyed by team identity (pool IDs) rather than any
+// provider's match IDs — so the same ordering works for ESPN test data AND the
+// football-data.org production feed, which use different IDs. The 16 R32 slots
+// are listed top-to-bottom in true bracket-tree order (ESPN's convention: the
+// lower-numbered R16 match sits on top of each branch, so Germany leads). Each
+// row of four is one quarter-final; pairs of rows share a semifinal. Verified
+// against the ESPN summary-API topology and Wikipedia's R16 connectivity.
+//   GER/PAR vs FRA/SWE, RSA/CAN vs NED/MAR → QF M97 ┐
+//   POR/CRO vs ESP/AUT, USA/BIH vs BEL/SEN → QF M98 ┴ SF1
+//   BRA/JPN vs CIV/NOR, MEX/ECU vs ENG/COD → QF M99 ┐
+//   ARG/CPV vs AUS/EGY, SUI/ALG vs COL/GHA → QF M100┴ SF2
+const R32_BRACKET_ORDER = [
+  ["GER", "PAR"], ["FRA", "SWE"], ["RSA", "CAN"], ["NED", "MAR"],
+  ["POR", "CRO"], ["ESP", "AUT"], ["USA", "BIH"], ["BEL", "SEN"],
+  ["BRA", "JPN"], ["CIV", "NOR"], ["MEX", "ECU"], ["ENG", "COD"],
+  ["ARG", "CPV"], ["AUS", "EGY"], ["SUI", "ALG"], ["COL", "GHA"],
+];
+
+// pool ID -> its R32 slot index (0-15). A team keeps this slot all tournament,
+// so any resolved team in a later-round match pins that match's position:
+// position-within-round = slotIndex >> roundDepth.
+const TEAM_TO_R32_SLOT = {};
+R32_BRACKET_ORDER.forEach((pair, i) => {
+  pair.forEach((id) => { TEAM_TO_R32_SLOT[id] = i; });
+});
+
+// Top-to-bottom position of a knockout match within its round, derived from
+// whichever of its teams is already known. Returns null when both sides are
+// still TBD (those fall into leftover slots, which render blank anyway).
+function bracketPosition(m, depth) {
+  const hId = liveTeamToId(m.home && m.home.code, m.home && m.home.name);
+  const aId = liveTeamToId(m.away && m.away.code, m.away && m.away.name);
+  let slot = TEAM_TO_R32_SLOT[hId];
+  if (slot == null) slot = TEAM_TO_R32_SLOT[aId];
+  if (slot == null) return null;
+  return slot >> depth;
+}
 
 // Fixed World Cup 2026 knockout structure. Always show all rounds so the
 // bracket tree is visible even when only early rounds have results.
-// 3rd-place match is rendered below the Final in the same column.
+// `depth` is how many rounds past R32 this is (R32=0 … Final=4), i.e. each slot
+// spans 2^depth R32 slots. 3rd-place match is rendered below the Final.
 const KO_STRUCTURE = [
-  { key: "r32", label: "R32",   count: 16 },
-  { key: "r16", label: "R16",   count: 8 },
-  { key: "qf",  label: "QF",    count: 4 },
-  { key: "sf",  label: "SF",    count: 2 },
-  { key: "f",   label: "Final", count: 1 },
+  { key: "r32", label: "R32",   count: 16, depth: 0 },
+  { key: "r16", label: "R16",   count: 8,  depth: 1 },
+  { key: "qf",  label: "QF",    count: 4,  depth: 2 },
+  { key: "sf",  label: "SF",    count: 2,  depth: 3 },
+  { key: "f",   label: "Final", count: 1,  depth: 4 },
 ];
 
 // Horizontal-scrolling bracket showing the full R32→Final tree. All rounds are
@@ -3082,22 +3099,30 @@ function KnockoutBracket({ matches }) {
       const ko = STAGE_TO_KO[m.stage];
       if (ko && out[ko]) out[ko].push(m);
     });
-    Object.entries(out).forEach(([key, arr]) => {
-      const order = BRACKET_SLOT_ORDER[key];
-      if (order) {
-        arr.sort((a, b) => {
-          const ai = order.indexOf(String(a.id));
-          const bi = order.indexOf(String(b.id));
-          const an = ai === -1 ? 999 : ai;
-          const bn = bi === -1 ? 999 : bi;
-          return an - bn;
-        });
-      } else {
-        arr.sort((a, b) => new Date(a.utcDate) - new Date(b.utcDate));
-      }
-    });
     return out;
   }, [matches]);
+
+  // Lay a round's matches into its fixed slots by bracket position. Matches whose
+  // teams are still TBD (no position) drop into whatever slots remain; empty
+  // slots become TBD placeholders. Returns an array of length `count`.
+  const placeRound = (round) => {
+    const slots = new Array(round.count).fill(null);
+    const leftovers = [];
+    for (const m of byRound[round.key]) {
+      const pos = bracketPosition(m, round.depth);
+      if (pos != null && pos >= 0 && pos < round.count && slots[pos] == null) {
+        slots[pos] = m;
+      } else {
+        leftovers.push(m);
+      }
+    }
+    for (let i = 0; i < slots.length && leftovers.length; i++) {
+      if (slots[i] == null) slots[i] = leftovers.shift();
+    }
+    return slots.map(
+      (m, i) => m || { id: `tbd-${round.key}-${i}`, status: "SCHEDULED" }
+    );
+  };
 
   // Only render once the feed has at least one knockout match.
   if (!KO_STRUCTURE.some((r) => byRound[r.key].length > 0)) return null;
@@ -3110,11 +3135,7 @@ function KnockoutBracket({ matches }) {
       <div className="overflow-x-auto -mx-4 px-4">
         <div className="flex gap-2 pb-1">
           {KO_STRUCTURE.map((round) => {
-            const real = byRound[round.key];
-            const items = real.slice();
-            while (items.length < round.count) {
-              items.push({ id: `tbd-${round.key}-${items.length}`, status: "SCHEDULED" });
-            }
+            const items = placeRound(round);
             const isFinal = round.key === "f";
             const tp = isFinal ? byRound["tp"] : null;
             const tpMatch = tp && tp.length > 0
