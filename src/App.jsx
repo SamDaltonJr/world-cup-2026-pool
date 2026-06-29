@@ -2737,12 +2737,14 @@ function ForecastView({ live, locked, results }) {
                     </button>
                     {isOpen && (
                       <div className="pl-7 pr-1 pb-2">
-                        {teams.map((t) => (
+                        {teams.map((t) => {
+                          const eliminated = results[t.id] && results[t.id].finish === "out";
+                          return (
                           <div
                             key={t.id}
                             className="flex items-center justify-between py-1"
                           >
-                            <span className="flex items-center gap-1.5 text-sm text-stone-700 min-w-0">
+                            <span className={"flex items-center gap-1.5 text-sm min-w-0 " + (eliminated ? "text-stone-400 line-through" : "text-stone-700")}>
                               <span className="font-mono text-[11px] text-stone-400">
                                 T{t.tier}
                               </span>
@@ -2759,7 +2761,7 @@ function ForecastView({ live, locked, results }) {
                               </span>
                             </span>
                           </div>
-                        ))}
+                        );})}
                         <div className="flex items-center justify-between py-1 mt-1 border-t border-stone-100">
                           <span className="text-xs text-stone-400">
                             Projected total
@@ -2952,6 +2954,131 @@ function ForecastView({ live, locked, results }) {
 }
 
 // ---------- Results (live feed) ----------
+
+// One match card in the knockout bracket: two team rows with score, winner highlighted.
+function KnockoutMatchCard({ m }) {
+  const done = m.status === "FINISHED";
+  const inPlay = m.status === "IN_PLAY" || m.status === "PAUSED";
+  const hasScore = (done || inPlay) && m.homeScore != null && m.awayScore != null;
+  const hWins = hasScore && m.homeScore > m.awayScore;
+  const aWins = hasScore && m.awayScore > m.homeScore;
+  const hId = liveTeamToId(m.home && m.home.code, m.home && m.home.name);
+  const aId = liveTeamToId(m.away && m.away.code, m.away && m.away.name);
+
+  const TeamRow = ({ id, name, score, wins }) => (
+    <div
+      className={
+        "flex items-center justify-between gap-1 px-2 py-1.5 " +
+        (wins ? "bg-emerald-50" : "")
+      }
+    >
+      <span
+        className={
+          "flex items-center gap-1 min-w-0 text-[12px] " +
+          (wins ? "font-bold text-stone-800" : "text-stone-500")
+        }
+      >
+        <Flag id={id} />
+        <span className="truncate">{name || "TBD"}</span>
+      </span>
+      {hasScore && (
+        <span
+          className={
+            "font-mono text-[12px] shrink-0 " +
+            (wins ? "font-bold text-stone-800" : "text-stone-400")
+          }
+        >
+          {score}
+        </span>
+      )}
+    </div>
+  );
+
+  return (
+    <div className="border border-stone-200 rounded-lg overflow-hidden bg-white">
+      <TeamRow
+        id={hId}
+        name={m.home && m.home.name}
+        score={m.homeScore}
+        wins={hWins}
+      />
+      <div className="border-t border-stone-100" />
+      <TeamRow
+        id={aId}
+        name={m.away && m.away.name}
+        score={m.awayScore}
+        wins={aWins}
+      />
+      {(done || inPlay) && (
+        <div
+          className={
+            "text-center text-[10px] py-0.5 " +
+            (inPlay ? "text-red-600 font-bold" : "text-stone-400")
+          }
+        >
+          {inPlay ? (m.minute ? `LIVE ${m.minute}'` : "LIVE") : "FT"}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Knockout rounds in display order (third-place shown alongside the Final).
+const KO_ROUNDS = [
+  { key: "r32", label: "Round of 32" },
+  { key: "r16", label: "Round of 16" },
+  { key: "qf", label: "Quarters" },
+  { key: "sf", label: "Semis" },
+  { key: "tp", label: "3rd Place" },
+  { key: "f", label: "Final" },
+];
+
+// Horizontal-scrolling bracket showing all knockout rounds that have at least
+// one match in the feed. Appears above the group standings once R32 slots are
+// known (after the group stage concludes).
+function KnockoutBracket({ matches }) {
+  const byRound = useMemo(() => {
+    const out = {};
+    KO_ROUNDS.forEach((r) => {
+      out[r.key] = [];
+    });
+    (matches || []).forEach((m) => {
+      const ko = STAGE_TO_KO[m.stage];
+      if (ko && out[ko]) out[ko].push(m);
+    });
+    Object.values(out).forEach((arr) =>
+      arr.sort((a, b) => new Date(a.utcDate) - new Date(b.utcDate))
+    );
+    return out;
+  }, [matches]);
+
+  const activeRounds = KO_ROUNDS.filter((r) => byRound[r.key].length > 0);
+  if (activeRounds.length === 0) return null;
+
+  return (
+    <div className="mb-4">
+      <div className="text-xs font-bold text-stone-400 uppercase tracking-wide mb-2">
+        Knockout bracket
+      </div>
+      <div className="overflow-x-auto -mx-4 px-4">
+        <div className="flex gap-3 pb-1">
+          {activeRounds.map((round) => (
+            <div key={round.key} className="shrink-0 w-[140px]">
+              <div className="text-[10px] font-bold uppercase tracking-wider text-stone-400 text-center mb-2">
+                {round.label}
+              </div>
+              <div className="flex flex-col gap-2">
+                {byRound[round.key].map((m) => (
+                  <KnockoutMatchCard key={m.id} m={m} />
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function MatchRow({ m }) {
   const live = m.status === "IN_PLAY" || m.status === "PAUSED";
@@ -3642,6 +3769,8 @@ function ResultsView({ live }) {
           </div>
         </div>
       )}
+
+      <KnockoutBracket matches={matches} />
 
       {standings.length > 0 && (
         <>
