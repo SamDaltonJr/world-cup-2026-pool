@@ -3061,7 +3061,7 @@ function KnockoutBracket({ matches }) {
         Knockout bracket
       </div>
       <div className="overflow-x-auto -mx-4 px-4">
-        <div className="flex gap-3 pb-1">
+        <div className="flex gap-3 pb-1 items-start">
           {activeRounds.map((round) => (
             <div key={round.key} className="shrink-0 w-[140px]">
               <div className="text-[10px] font-bold uppercase tracking-wider text-stone-400 text-center mb-2">
