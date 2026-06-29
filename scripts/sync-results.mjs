@@ -107,6 +107,7 @@ async function fetchFromFootballData() {
     awayScore: m.score?.fullTime?.away ?? null,
     winner: normWinner(m.score?.winner),
     minute: null,
+    venue: m.venue ? { name: m.venue.name || null, city: m.venue.city || null } : null,
   }));
 
   const standings = (standingsRes.standings || [])

@@ -2955,8 +2955,10 @@ function ForecastView({ live, locked, results }) {
 
 // ---------- Results (live feed) ----------
 
-// One match card in the knockout bracket: two team rows with score, winner highlighted.
+// One match card in the knockout bracket. Compact: just flag + team code + score.
+// Click to expand and reveal date, venue, and city.
 function KnockoutMatchCard({ m }) {
+  const [open, setOpen] = useState(false);
   const done = m.status === "FINISHED";
   const inPlay = m.status === "IN_PLAY" || m.status === "PAUSED";
   const hasScore = (done || inPlay) && m.homeScore != null && m.awayScore != null;
@@ -2964,96 +2966,141 @@ function KnockoutMatchCard({ m }) {
   const aWins = hasScore && m.awayScore > m.homeScore;
   const hId = liveTeamToId(m.home && m.home.code, m.home && m.home.name);
   const aId = liveTeamToId(m.away && m.away.code, m.away && m.away.name);
+  // ESPN placeholder codes for unresolved slots: RD32, RD16 W1, QFW1, QW4, SFW2…
+  const isPlaceholder = (side) =>
+    !side ||
+    /^(RD|QF?W|SF?W|FW?)\d/i.test(side.code || "") ||
+    /round of \d+/i.test(side.name || "");
+  const resolveName = (side) => {
+    if (isPlaceholder(side)) return null;
+    return (side && (side.code || side.name)) || null;
+  };
+  const hName = resolveName(m.home);
+  const aName = resolveName(m.away);
+  const hasDetail = !!(m.utcDate || m.venue);
 
   const TeamRow = ({ id, name, score, wins }) => (
-    <div
-      className={
-        "flex items-center justify-between gap-1 px-2 py-1.5 " +
-        (wins ? "bg-emerald-50" : "")
-      }
-    >
-      <span
-        className={
-          "flex items-center gap-1 min-w-0 text-[12px] " +
-          (wins ? "font-bold text-stone-800" : "text-stone-500")
-        }
-      >
-        <Flag id={id} />
-        <span className="truncate">{name || "TBD"}</span>
+    <div className={"flex items-center justify-between gap-1 px-1.5 py-1 " + (wins ? "bg-emerald-50" : "")}>
+      <span className={"flex items-center gap-1 min-w-0 " + (wins ? "font-bold text-stone-800" : "text-stone-500")}>
+        {name ? (
+          <>
+            <Flag id={id} />
+            <span className="text-[11px] truncate">{name}</span>
+          </>
+        ) : (
+          <span className="text-[11px] text-stone-300">&nbsp;</span>
+        )}
       </span>
       {hasScore && (
-        <span
-          className={
-            "font-mono text-[12px] shrink-0 " +
-            (wins ? "font-bold text-stone-800" : "text-stone-400")
-          }
-        >
+        <span className={"font-mono text-[11px] shrink-0 " + (wins ? "font-bold text-stone-800" : "text-stone-400")}>
           {score}
         </span>
       )}
     </div>
   );
 
+  const dateLabel = m.utcDate
+    ? new Date(m.utcDate).toLocaleString(undefined, {
+        month: "short", day: "numeric", hour: "numeric", minute: "2-digit",
+      })
+    : null;
+
   return (
-    <div className="border border-stone-200 rounded-lg overflow-hidden bg-white">
-      <TeamRow
-        id={hId}
-        name={m.home && m.home.name}
-        score={m.homeScore}
-        wins={hWins}
-      />
-      <div className="border-t border-stone-100" />
-      <TeamRow
-        id={aId}
-        name={m.away && m.away.name}
-        score={m.awayScore}
-        wins={aWins}
-      />
-      {(done || inPlay) && (
-        <div
-          className={
-            "text-center text-[10px] py-0.5 " +
-            (inPlay ? "text-red-600 font-bold" : "text-stone-400")
-          }
-        >
-          {inPlay ? (m.minute ? `LIVE ${m.minute}'` : "LIVE") : "FT"}
+    <div className={"border rounded overflow-hidden bg-white " + (hName || aName ? "border-stone-200" : "border-stone-100")}>
+      <button
+        type="button"
+        onClick={hasDetail ? () => setOpen((v) => !v) : undefined}
+        className={"w-full text-left " + (hasDetail ? "cursor-pointer" : "cursor-default")}
+      >
+        <TeamRow id={hId} name={hName} score={m.homeScore} wins={hWins} />
+        <div className="border-t border-stone-100" />
+        <TeamRow id={aId} name={aName} score={m.awayScore} wins={aWins} />
+        {(done || inPlay) && (
+          <div className={"text-center text-[9px] py-0.5 " + (inPlay ? "text-red-600 font-bold" : "text-stone-300")}>
+            {inPlay ? (m.minute ? `${m.minute}'` : "LIVE") : "FT"}
+          </div>
+        )}
+      </button>
+      {open && (
+        <div className="border-t border-stone-100 px-1.5 py-1.5 text-[10px] text-stone-500 leading-snug">
+          {dateLabel && <div>{dateLabel}</div>}
+          {m.venue && (
+            <div className="text-stone-400">
+              {m.venue.name}
+              {m.venue.city ? ` · ${m.venue.city}` : ""}
+            </div>
+          )}
         </div>
       )}
     </div>
   );
 }
 
-// Knockout rounds in display order (third-place shown alongside the Final).
-const KO_ROUNDS = [
-  { key: "r32", label: "Round of 32" },
-  { key: "r16", label: "Round of 16" },
-  { key: "qf", label: "Quarters" },
-  { key: "sf", label: "Semis" },
-  { key: "tp", label: "3rd Place" },
-  { key: "f", label: "Final" },
+// Official FIFA 2026 bracket slot order (ESPN event IDs, top-to-bottom per round).
+// ESPN labels R32 slots by official FIFA match number (73-88), NOT by event-ID
+// order — so the event IDs below are NOT sequential. Tree verified against the
+// ESPN summary API topology and Wikipedia's R16 connectivity.
+// Ordered top-to-bottom by official FIFA match number (ESPN's bracket convention:
+// the lower-numbered R16 match sits on top of each branch, so M89/Germany leads).
+// R16 pairings (adjacent R32 slots meet here):
+//   M89 GER/PAR vs FRA/SWE, M90 RSA/CAN vs NED/MAR → QF M97 ┐
+//   M93 POR/CRO vs ESP/AUT, M94 USA/BIH vs BEL/SEN → QF M98 ┴ SF1
+//   M91 BRA/JPN vs CIV/NOR, M92 MEX/ECU vs ENG/COD → QF M99 ┐
+//   M95 ARG/CPV vs AUS/EGY, M96 SUI/ALG vs COL/GHA → QF M100┴ SF2
+const BRACKET_SLOT_ORDER = {
+  r32: ["760489","760492","760486","760488",  // GER/PAR, FRA/SWE, RSA/CAN, NED/MAR → QF M97 ┐
+        "760496","760497","760494","760493",  // POR/CRO, ESP/AUT, USA/BIH, BEL/SEN → QF M98 ┴ SF1
+        "760487","760490","760491","760495",  // BRA/JPN, CIV/NOR, MEX/ECU, ENG/COD → QF M99 ┐
+        "760500","760499","760498","760501"], // ARG/CPV, AUS/EGY, SUI/ALG, COL/GHA → QF M100┴ SF2
+  r16: ["760503","760502","760506","760507","760504","760505","760509","760508"],
+  qf:  ["760510","760511","760512","760513"],
+  sf:  ["760514","760515"],
+  f:   ["760517"],
+};
+
+// Fixed World Cup 2026 knockout structure. Always show all rounds so the
+// bracket tree is visible even when only early rounds have results.
+// 3rd-place match is rendered below the Final in the same column.
+const KO_STRUCTURE = [
+  { key: "r32", label: "R32",   count: 16 },
+  { key: "r16", label: "R16",   count: 8 },
+  { key: "qf",  label: "QF",    count: 4 },
+  { key: "sf",  label: "SF",    count: 2 },
+  { key: "f",   label: "Final", count: 1 },
 ];
 
-// Horizontal-scrolling bracket showing all knockout rounds that have at least
-// one match in the feed. Appears above the group standings once R32 slots are
-// known (after the group stage concludes).
+// Horizontal-scrolling bracket showing the full R32→Final tree. All rounds are
+// always rendered — completed/scheduled matches show real data, future slots
+// show TBD. All columns share the same height (align-items:stretch) and use
+// justify-around, so each round's matches are centered between their feeders.
 function KnockoutBracket({ matches }) {
   const byRound = useMemo(() => {
     const out = {};
-    KO_ROUNDS.forEach((r) => {
-      out[r.key] = [];
-    });
+    KO_STRUCTURE.forEach((r) => { out[r.key] = []; });
+    out["tp"] = [];
     (matches || []).forEach((m) => {
       const ko = STAGE_TO_KO[m.stage];
       if (ko && out[ko]) out[ko].push(m);
     });
-    Object.values(out).forEach((arr) =>
-      arr.sort((a, b) => new Date(a.utcDate) - new Date(b.utcDate))
-    );
+    Object.entries(out).forEach(([key, arr]) => {
+      const order = BRACKET_SLOT_ORDER[key];
+      if (order) {
+        arr.sort((a, b) => {
+          const ai = order.indexOf(String(a.id));
+          const bi = order.indexOf(String(b.id));
+          const an = ai === -1 ? 999 : ai;
+          const bn = bi === -1 ? 999 : bi;
+          return an - bn;
+        });
+      } else {
+        arr.sort((a, b) => new Date(a.utcDate) - new Date(b.utcDate));
+      }
+    });
     return out;
   }, [matches]);
 
-  const activeRounds = KO_ROUNDS.filter((r) => byRound[r.key].length > 0);
-  if (activeRounds.length === 0) return null;
+  // Only render once the feed has at least one knockout match.
+  if (!KO_STRUCTURE.some((r) => byRound[r.key].length > 0)) return null;
 
   return (
     <div className="mb-4">
@@ -3061,19 +3108,41 @@ function KnockoutBracket({ matches }) {
         Knockout bracket
       </div>
       <div className="overflow-x-auto -mx-4 px-4">
-        <div className="flex gap-3 pb-1 items-start">
-          {activeRounds.map((round) => (
-            <div key={round.key} className="shrink-0 w-[140px]">
-              <div className="text-[10px] font-bold uppercase tracking-wider text-stone-400 text-center mb-2">
-                {round.label}
+        <div className="flex gap-2 pb-1">
+          {KO_STRUCTURE.map((round) => {
+            const real = byRound[round.key];
+            const items = real.slice();
+            while (items.length < round.count) {
+              items.push({ id: `tbd-${round.key}-${items.length}`, status: "SCHEDULED" });
+            }
+            const isFinal = round.key === "f";
+            const tp = isFinal ? byRound["tp"] : null;
+            const tpMatch = tp && tp.length > 0
+              ? tp[0]
+              : isFinal
+              ? { id: "tbd-tp-0", status: "SCHEDULED" }
+              : null;
+            return (
+              <div key={round.key} className="shrink-0 w-[90px] flex flex-col">
+                <div className="text-[9px] font-bold uppercase tracking-wider text-stone-400 text-center mb-1.5 shrink-0">
+                  {round.label}
+                </div>
+                <div className="flex flex-col justify-around flex-1 gap-1">
+                  {items.map((m) => (
+                    <KnockoutMatchCard key={m.id} m={m} />
+                  ))}
+                </div>
+                {tpMatch && (
+                  <div className="mt-8 shrink-0">
+                    <div className="text-[9px] font-bold uppercase tracking-wider text-stone-400 text-center mb-1.5">
+                      3rd Place
+                    </div>
+                    <KnockoutMatchCard m={tpMatch} />
+                  </div>
+                )}
               </div>
-              <div className="flex flex-col gap-2">
-                {byRound[round.key].map((m) => (
-                  <KnockoutMatchCard key={m.id} m={m} />
-                ))}
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       </div>
     </div>
@@ -4290,6 +4359,16 @@ export default function WorldCupTierPool() {
         if (l && l.value) setLive(JSON.parse(l.value));
       } catch (e) {
         // no live feed yet
+      }
+      // Dev fallback: when Supabase isn't configured, load test data generated
+      // by scripts/gen-test-live.mjs so the Results/Projections tabs are usable.
+      if (!isConfigured) {
+        try {
+          const res = await fetch("/test-live.json");
+          if (res.ok) setLive(await res.json());
+        } catch (e) {
+          // file not present; run scripts/gen-test-live.mjs to create it
+        }
       }
       setLoaded(true);
     })();
