@@ -341,126 +341,155 @@ function liveTeamToId(code, name) {
 const ESPN_SCOREBOARD =
   "https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard";
 
-// Same canonicalization used in sync-results.mjs so team names match across providers.
-const ESPN_NAME_CANON = {
-  "korea republic": "korea",
-  "south korea": "korea",
-  czechia: "czech",
-  "czech republic": "czech",
-  turkiye: "turkey",
-  turkey: "turkey",
-  "united states": "usa",
-  usa: "usa",
-  "ivory coast": "ivory coast",
-  "cote divoire": "ivory coast",
-  "cape verde": "cape verde",
-  "cabo verde": "cape verde",
-  "dr congo": "congo",
-  "congo dr": "congo",
-  "democratic republic of the congo": "congo",
-  "bosnia and herzegovina": "bosnia",
-  "bosnia herzegovina": "bosnia",
-  "ir iran": "iran",
+
+// ---------- ESPN as the primary results source ----------
+// One keyless, CORS-friendly ESPN call returns the whole tournament (schedule,
+// live scores, finals, shootouts), so the browser doesn't depend on the
+// scheduled sync Action for results. Supabase stays as a fallback + the Golden
+// Boot scorers (which ESPN's scoreboard doesn't carry). Maps each event to the
+// same match shape the sync Action writes — see scripts/gen-test-live.mjs.
+
+// Tournament window: opening match (Jun 11) through the Final (Jul 19, 2026).
+const ESPN_RANGE_URL =
+  `${ESPN_SCOREBOARD}?dates=20260611-20260719&limit=200`;
+
+// ESPN season.slug -> our stage constants.
+const ESPN_SLUG_TO_STAGE = {
+  "group-stage": "GROUP_STAGE",
+  "round-of-32": "LAST_32",
+  "round-of-16": "LAST_16",
+  "quarterfinals": "QUARTER_FINALS",
+  "quarterfinal": "QUARTER_FINALS",
+  "semifinals": "SEMI_FINALS",
+  "semifinal": "SEMI_FINALS",
+  "third-place": "THIRD_PLACE",
+  "final": "FINAL",
 };
 
-function espnCanon(name) {
-  const n = (name || "")
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[̀-ͯ]/g, "")
-    .replace(/[^a-z ]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-  return ESPN_NAME_CANON[n] || n;
+function parseEspnEvent(ev) {
+  const comp = (ev.competitions && ev.competitions[0]) || null;
+  if (!comp) return null;
+  const type = comp.status && comp.status.type;
+  if (!type) return null;
+  const state = type.state; // "pre" | "in" | "post"
+  const competitors = comp.competitors || [];
+  const home = competitors.find((c) => c.homeAway === "home");
+  const away = competitors.find((c) => c.homeAway === "away");
+  if (!home || !away) return null;
+
+  const teamName = (c) => (c.team && (c.team.displayName || c.team.name)) || null;
+  const teamCode = (c) => (c.team && c.team.abbreviation) || null;
+  const toScore = (s) => (s == null || s === "" ? null : Number(s));
+
+  const stage = ESPN_SLUG_TO_STAGE[(ev.season && ev.season.slug) || ""] || "GROUP_STAGE";
+  const gm = (comp.altGameNote || "").match(/Group\s+([A-L])/i);
+  const group = gm ? `GROUP_${gm[1].toUpperCase()}` : null;
+
+  const done = state === "post";
+  const inPlay = state === "in";
+  const hs = done || inPlay ? toScore(home.score) : null;
+  const as_ = done || inPlay ? toScore(away.score) : null;
+
+  // Shootout tally (present during/after a knockout penalty shootout).
+  const penH = toScore(home.shootoutScore);
+  const penA = toScore(away.shootoutScore);
+  const penalties = penH != null || penA != null ? { home: penH, away: penA } : null;
+
+  let status, minute = null;
+  if (done) {
+    status = "FINISHED";
+  } else if (inPlay) {
+    const label = (type.name || "") + " " + (type.description || "");
+    const paused = /half ?time|HT/i.test(label);
+    status = paused ? "PAUSED" : "IN_PLAY";
+    const cm = /(\d+)/.exec((comp.status && comp.status.displayClock) || "");
+    minute = paused ? null : cm ? Number(cm[1]) : null;
+  } else {
+    status = "SCHEDULED";
+  }
+
+  // Winner: shootout decides it; otherwise the regulation score (finished only).
+  let winner = null;
+  if (penalties) winner = penH > penA ? "HOME" : penA > penH ? "AWAY" : null;
+  else if (done && hs != null && as_ != null)
+    winner = hs > as_ ? "HOME" : as_ > hs ? "AWAY" : "DRAW";
+
+  return {
+    id: ev.id,
+    utcDate: ev.date,
+    status,
+    stage,
+    group,
+    home: { code: teamCode(home), name: teamName(home) },
+    away: { code: teamCode(away), name: teamName(away) },
+    homeScore: hs,
+    awayScore: as_,
+    penalties,
+    winner,
+    minute,
+    venue: comp.venue
+      ? { name: comp.venue.fullName || null, city: (comp.venue.address && comp.venue.address.city) || null }
+      : null,
+  };
 }
 
-function espnMatchKey(homeName, awayName, dateIso) {
-  const day = (dateIso || "").slice(0, 10);
-  return [espnCanon(homeName), espnCanon(awayName)].sort().join("|") + "@" + day;
-}
-
-// Fetch live (in-progress) and just-finished (post) matches from ESPN's
-// public scoreboard. "post" matches become provisional FINISHED results so the
-// app shows the final score immediately without waiting for the GitHub Action.
-async function fetchEspnScores() {
-  const res = await fetch(ESPN_SCOREBOARD);
+async function fetchEspnFull() {
+  const res = await fetch(ESPN_RANGE_URL);
   if (!res.ok) throw new Error(`ESPN ${res.status}`);
   const j = await res.json();
-  const out = [];
+  const matches = [];
+  const seen = new Set();
   for (const ev of j.events || []) {
-    const comp = (ev.competitions && ev.competitions[0]) || null;
-    const status = (comp && comp.status) || ev.status || null;
-    const type = status && status.type;
-    if (!comp || !type) continue;
-    const state = type.state; // "pre" | "in" | "post"
-    if (state !== "in" && state !== "post") continue;
-    const competitors = comp.competitors || [];
-    const home = competitors.find((c) => c.homeAway === "home");
-    const away = competitors.find((c) => c.homeAway === "away");
-    if (!home || !away) continue;
-    const teamName = (c) => (c.team && (c.team.displayName || c.team.name)) || null;
-    const toScore = (s) => (s == null || s === "" ? null : Number(s));
-    // Penalty shootout tally, when ESPN reports one (knockout draws decided on
-    // pens). Derive the winner from it so the bracket can highlight the advancer.
-    const penH = toScore(home.shootoutScore);
-    const penA = toScore(away.shootoutScore);
-    const penalties = penH != null || penA != null ? { home: penH, away: penA } : null;
-    const penWinner = penalties
-      ? penH > penA ? "HOME" : penA > penH ? "AWAY" : null
-      : null;
-    if (state === "post") {
-      out.push({
-        home: teamName(home),
-        away: teamName(away),
-        date: ev.date,
-        homeScore: toScore(home.score),
-        awayScore: toScore(away.score),
-        penalties,
-        winner: penWinner,
-        minute: null,
-        status: "FINISHED",
-        _espnProvisional: true,
-      });
-    } else {
-      const label = (type.name || "") + " " + (type.description || "");
-      const paused = /half.?time|HT/i.test(label);
-      const clockMatch = /(\d+)/.exec((status && status.displayClock) || "");
-      out.push({
-        home: teamName(home),
-        away: teamName(away),
-        date: ev.date,
-        homeScore: toScore(home.score),
-        awayScore: toScore(away.score),
-        penalties,
-        winner: penWinner,
-        minute: paused ? null : clockMatch ? Number(clockMatch[1]) : null,
-        status: paused ? "PAUSED" : "IN_PLAY",
-      });
-    }
+    if (seen.has(ev.id)) continue;
+    seen.add(ev.id);
+    const m = parseEspnEvent(ev);
+    if (m) matches.push(m);
   }
-  return out;
+  matches.sort((a, b) => new Date(a.utcDate) - new Date(b.utcDate));
+  return { matches, source: "ESPN (direct)" };
 }
 
-// Overlay ESPN scores onto the base matches from Supabase.
-// Official FINISHED results from football-data are never overwritten; ESPN
-// provisional finals fill in the gap until the Action catches up.
-function applyEspnOverlay(baseMatches, espnScores) {
-  if (!espnScores || !espnScores.length) return baseMatches;
-  const byKey = {};
-  for (const lv of espnScores)
-    byKey[espnMatchKey(lv.home, lv.away, lv.date)] = lv;
-  return baseMatches.map((m) => {
-    // Keep official FINISHED from football-data; re-apply ESPN provisional if
-    // that's all we have (so a fresh Supabase poll doesn't blank the score).
-    if (m.status === "FINISHED" && !m._espnProvisional) return m;
-    const key = espnMatchKey(m.home && m.home.name, m.away && m.away.name, m.utcDate);
-    const lv = byKey[key];
-    if (!lv) return m;
-    if (lv.status === "FINISHED") {
-      return { ...m, status: "FINISHED", homeScore: lv.homeScore, awayScore: lv.awayScore, penalties: lv.penalties ?? m.penalties ?? null, winner: lv.winner ?? m.winner ?? null, minute: null, _espnProvisional: true };
+// Build the `live` payload the app renders: ESPN-direct for matches (primary),
+// Supabase for the Golden Boot scorers and as a fallback if ESPN is unreachable,
+// and standings derived client-side from the match list (fresher and consistent
+// with the Results table). Returns null only if no source yields any matches.
+async function loadLiveData() {
+  let espn = null;
+  try {
+    espn = await fetchEspnFull();
+  } catch (e) {
+    // ESPN unreachable this tick — fall back to Supabase below.
+  }
+
+  let supa = null;
+  try {
+    const l = await storage.get("live", true);
+    if (l && l.value) supa = JSON.parse(l.value);
+  } catch (e) {
+    // no Supabase live row (or unconfigured) — fine.
+  }
+
+  // Last-resort offline fallback for local dev with no network/Supabase.
+  if (!espn && !supa) {
+    try {
+      const r = await fetch("/test-live.json");
+      if (r.ok) supa = await r.json();
+    } catch (e) {
+      // nothing available
     }
-    return { ...m, status: lv.status, homeScore: lv.homeScore, awayScore: lv.awayScore, penalties: lv.penalties ?? m.penalties ?? null, winner: lv.winner ?? m.winner ?? null, minute: lv.minute, _live: true };
-  });
+  }
+
+  const espnOk = espn && espn.matches.length > 0;
+  const matches = espnOk ? espn.matches : supa ? supa.matches : null;
+  if (!matches || !matches.length) return null;
+
+  return {
+    matches,
+    standings: deriveStandings(matches),
+    scorers: (supa && supa.scorers) || [],
+    source: espnOk ? "ESPN (direct)" : (supa && supa.source) || "—",
+    updatedAt: new Date().toISOString(),
+  };
 }
 
 // Derive group standings from the match data already in the live feed.
@@ -649,9 +678,20 @@ function deriveResults(live, prev) {
     const t = side === "HOME" ? mt.home : mt.away;
     const id = liveTeamToId(t && t.code, t && t.name);
     if (id && out[id]) out[id].ko = { ...out[id].ko, [ko]: true };
+    // The other side lost this knockout match, so it's eliminated — flag it so
+    // the Projections/Leaderboard lists cross it out (like a group-stage "out").
+    const loser = side === "HOME" ? mt.away : mt.home;
+    const lid = liveTeamToId(loser && loser.code, loser && loser.name);
+    if (lid && out[lid]) out[lid].koEliminated = true;
   });
 
   return out;
+}
+
+// A pick is eliminated if it failed to advance from its group ("out") or lost a
+// knockout match (koEliminated). Used to cross out dead teams in the lists.
+function isEliminated(r) {
+  return !!(r && (r.finish === "out" || r.koEliminated));
 }
 
 function entryTeamIds(entry) {
@@ -1330,7 +1370,7 @@ function LeaderboardView({ results, settings, locked, live }) {
                       <span
                         className={
                           "text-sm " +
-                          (r && r.finish === "out"
+                          (isEliminated(r)
                             ? "text-stone-400 line-through"
                             : "text-stone-700")
                         }
@@ -2750,7 +2790,7 @@ function ForecastView({ live, locked, results }) {
                     {isOpen && (
                       <div className="pl-7 pr-1 pb-2">
                         {teams.map((t) => {
-                          const eliminated = results[t.id] && results[t.id].finish === "out";
+                          const eliminated = isEliminated(results[t.id]);
                           return (
                           <div
                             key={t.id}
@@ -4454,59 +4494,27 @@ export default function WorldCupTierPool() {
       } catch (e) {
         // default settings
       }
-      try {
-        const l = await storage.get("live", true);
-        if (l && l.value) setLive(JSON.parse(l.value));
-      } catch (e) {
-        // no live feed yet
-      }
-      // Dev fallback: when Supabase isn't configured, load test data generated
-      // by scripts/gen-test-live.mjs so the Results/Projections tabs are usable.
-      if (!isConfigured) {
-        try {
-          const res = await fetch("/test-live.json");
-          if (res.ok) setLive(await res.json());
-        } catch (e) {
-          // file not present; run scripts/gen-test-live.mjs to create it
-        }
-      }
+      // Live results: ESPN-direct (primary) + Supabase (scorers/fallback).
+      const initial = await loadLiveData();
+      if (initial) setLive(initial);
       setLoaded(true);
     })();
   }, []);
 
-  // Poll the live feed so an open page picks up new scores without a reload.
-  // The GitHub Action refreshes Supabase periodically; checking once a minute
-  // picks up schedule/standings/final-result updates.
+  // Refresh results every 30 s straight from ESPN (keyless, public, no CORS
+  // limits), so an open page picks up live scores and finals without waiting on
+  // the scheduled sync Action. Supabase is folded in only as a fallback and for
+  // the Golden Boot scorers. Keep the last good scorers if a poll misses them.
   useEffect(() => {
     const t = setInterval(async () => {
-      try {
-        const l = await storage.get("live", true);
-        if (l && l.value) setLive(JSON.parse(l.value));
-      } catch (e) {
-        // transient; try again next tick
-      }
-    }, 60000);
-    return () => clearInterval(t);
-  }, []);
-
-  // Poll ESPN directly from the browser every 30 s for live scores.
-  // This is faster and more reliable than waiting for the GitHub Action.
-  // ESPN's scoreboard is keyless and public with no CORS restrictions.
-  useEffect(() => {
-    async function pollEspn() {
-      try {
-        const espnLive = await fetchEspnScores();
-        setLive((prev) => {
-          if (!prev) return prev;
-          const merged = applyEspnOverlay(prev.matches || [], espnLive);
-          return { ...prev, matches: merged };
-        });
-      } catch (e) {
-        // transient; next tick will retry
-      }
-    }
-    pollEspn();
-    const t = setInterval(pollEspn, 30000);
+      const next = await loadLiveData();
+      if (!next) return;
+      setLive((prev) =>
+        next.scorers.length || !prev
+          ? next
+          : { ...next, scorers: prev.scorers || [] }
+      );
+    }, 30000);
     return () => clearInterval(t);
   }, []);
 
