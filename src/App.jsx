@@ -694,6 +694,29 @@ function isEliminated(r) {
   return !!(r && (r.finish === "out" || r.koEliminated));
 }
 
+// Team IDs that lost a finished knockout match, read straight from the live
+// feed. This makes the crossed-out styling immediate — it doesn't wait for the
+// commissioner to Sync-from-live + Save (group-stage "out" still comes from the
+// saved results). Same winner logic as deriveResults, so shootout losers count.
+function koEliminatedSet(live) {
+  const set = new Set();
+  (live && live.matches ? live.matches : []).forEach((mt) => {
+    if (!STAGE_TO_KO[mt.stage] || mt.status !== "FINISHED" || mt._provisional) return;
+    let side = mt.winner; // HOME | AWAY | DRAW | null
+    if (side !== "HOME" && side !== "AWAY") {
+      if (mt.homeScore != null && mt.awayScore != null) {
+        if (mt.homeScore > mt.awayScore) side = "HOME";
+        else if (mt.awayScore > mt.homeScore) side = "AWAY";
+      }
+    }
+    if (side !== "HOME" && side !== "AWAY") return;
+    const loser = side === "HOME" ? mt.away : mt.home;
+    const lid = liveTeamToId(loser && loser.code, loser && loser.name);
+    if (lid) set.add(lid);
+  });
+  return set;
+}
+
 function entryTeamIds(entry) {
   // Picks are stored per tier. New entries use arrays for every tier; older
   // entries may have a bare string for single-pick tiers — handle both.
@@ -1132,6 +1155,7 @@ function LeaderboardView({ results, settings, locked, live }) {
   const [expanded, setExpanded] = useState(null);
   const [loadError, setLoadError] = useState("");
   const [sortBy, setSortBy] = useState("total"); // "total" | "pct"
+  const koOut = useMemo(() => koEliminatedSet(live), [live]);
 
   const loadEntries = async () => {
     setLoadError("");
@@ -1370,7 +1394,7 @@ function LeaderboardView({ results, settings, locked, live }) {
                       <span
                         className={
                           "text-sm " +
-                          (isEliminated(r)
+                          (isEliminated(r) || koOut.has(id)
                             ? "text-stone-400 line-through"
                             : "text-stone-700")
                         }
@@ -2380,6 +2404,7 @@ function ForecastView({ live, locked, results }) {
   const [expanded, setExpanded] = useState(null); // expanded pool-entry name
   const [showAllMatches, setShowAllMatches] = useState(false);
   const [view, setView] = useState("cup"); // "cup" (tournament) | "pool"
+  const koOut = useMemo(() => koEliminatedSet(live), [live]);
 
   // Teams in a live match right now, to flag them across the projection tables.
   const liveIds = useMemo(() => liveTeamIds(live), [live]);
@@ -2790,7 +2815,7 @@ function ForecastView({ live, locked, results }) {
                     {isOpen && (
                       <div className="pl-7 pr-1 pb-2">
                         {teams.map((t) => {
-                          const eliminated = isEliminated(results[t.id]);
+                          const eliminated = isEliminated(results[t.id]) || koOut.has(t.id);
                           return (
                           <div
                             key={t.id}
