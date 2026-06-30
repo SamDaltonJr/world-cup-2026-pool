@@ -80,6 +80,12 @@ function parseEvent(ev) {
   const hs = toScore(home.score);
   const as_ = toScore(away.score);
 
+  // Knockout shootout: ESPN exposes shootoutScore on each side. When a draw is
+  // decided on pens, the winner comes from the shootout, not the level score.
+  const penH = toScore(home.shootoutScore);
+  const penA = toScore(away.shootoutScore);
+  const penalties = penH != null || penA != null ? { home: penH, away: penA } : null;
+
   return {
     id: ev.id,
     utcDate: ev.date,
@@ -90,9 +96,12 @@ function parseEvent(ev) {
     away: { code: teamCode(away), name: teamName(away) },
     homeScore: done || inPlay ? hs : null,
     awayScore: done || inPlay ? as_ : null,
-    winner: done && hs != null && as_ != null
-      ? hs > as_ ? "HOME" : as_ > hs ? "AWAY" : "DRAW"
-      : null,
+    penalties: done || inPlay ? penalties : null,
+    winner: penalties
+      ? penH > penA ? "HOME" : penA > penH ? "AWAY" : null
+      : done && hs != null && as_ != null
+        ? hs > as_ ? "HOME" : as_ > hs ? "AWAY" : "DRAW"
+        : null,
     minute: null,
     venue: comp.venue
       ? { name: comp.venue.fullName || null, city: comp.venue.address?.city || null }

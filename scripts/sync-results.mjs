@@ -88,6 +88,12 @@ function normTeam(t) {
   return { code: t.tla || null, name: t.name || null, crest: t.crest || null };
 }
 
+// Penalty shootout score, or null when the match wasn't decided on penalties.
+function normPenalties(p) {
+  if (!p || (p.home == null && p.away == null)) return null;
+  return { home: p.home ?? null, away: p.away ?? null };
+}
+
 async function fetchFromFootballData() {
   const [matchesRes, standingsRes] = await Promise.all([
     apiGet(`/competitions/${COMPETITION}/matches`),
@@ -106,6 +112,10 @@ async function fetchFromFootballData() {
     homeScore: m.score?.fullTime?.home ?? null,
     awayScore: m.score?.fullTime?.away ?? null,
     winner: normWinner(m.score?.winner),
+    // Knockout shootout result, when the match was decided on penalties. The
+    // fullTime score above stays the (drawn) score after extra time; this holds
+    // the separate shootout tally so the UI can show e.g. "1 (4)".
+    penalties: normPenalties(m.score?.penalties),
     minute: null,
     venue: m.venue ? { name: m.venue.name || null, city: m.venue.city || null } : null,
   }));
@@ -147,12 +157,17 @@ async function fetchScorers() {
   }));
 }
 
-// ---------- ESPN (live in-play scores only) ----------
+// ---------- ESPN (live in-play scores + knockout shootout finals) ----------
 
-// Pull every World Cup fixture ESPN currently lists and keep only the ones in
-// progress (status state "in"). Returns the same shape the merge step expects:
-// { home, away, date, homeScore, awayScore, minute, status }. Finished matches
-// are ignored here — football-data's official final is the authority for those.
+// Pull every World Cup fixture ESPN currently lists. We keep two kinds:
+//   • in-progress matches (status state "in") — the live overlay, as before.
+//   • FINISHED penalty shootouts (state "post" with a shootoutScore) — the one
+//     case where football-data is unreliable: it folds the shootout into the
+//     fullTime score (e.g. a 1-1 PK win shows as "4-5") and leaves winner null.
+//     ESPN reports these cleanly (regulation score + shootoutScore), so we let
+//     it correct the knockout finals. Non-shootout finals stay football-data's.
+// Returns the merge shape: { home, away, date, homeScore, awayScore, penalties,
+// winner, minute, status }.
 async function fetchLiveScores() {
   const res = await fetch(ESPN_SCOREBOARD);
   if (!res.ok) throw new Error(`ESPN -> ${res.status} ${res.statusText}`);
@@ -164,7 +179,8 @@ async function fetchLiveScores() {
     const status = (comp && comp.status) || ev.status || null;
     const type = status && status.type;
     // state: "pre" (scheduled) | "in" (live) | "post" (finished).
-    if (!comp || !type || type.state !== "in") continue;
+    const state = type && type.state;
+    if (!comp || !type || (state !== "in" && state !== "post")) continue;
 
     const competitors = comp.competitors || [];
     const home = competitors.find((c) => c.homeAway === "home");
@@ -174,6 +190,33 @@ async function fetchLiveScores() {
     const teamName = (c) =>
       (c.team && (c.team.displayName || c.team.name)) || null;
     const toScore = (s) => (s == null || s === "" ? null : Number(s));
+
+    // During/after a shootout ESPN exposes each side's shootoutScore. When
+    // present, carry it as the penalties tally and derive the winner from it.
+    const penH = toScore(home.shootoutScore);
+    const penA = toScore(away.shootoutScore);
+    const penalties = penH != null || penA != null ? { home: penH, away: penA } : null;
+    const penWinner = penalties
+      ? penH > penA ? "HOME" : penA > penH ? "AWAY" : null
+      : null;
+
+    // Finished games: only carry shootouts (to correct football-data). Plain
+    // finals are left to football-data, which handles them fine.
+    if (state === "post") {
+      if (!penalties) continue;
+      out.push({
+        home: teamName(home),
+        away: teamName(away),
+        date: ev.date,
+        homeScore: toScore(home.score), // regulation/ET score (the real draw)
+        awayScore: toScore(away.score),
+        penalties,
+        winner: penWinner,
+        minute: null,
+        status: "FINISHED",
+      });
+      continue;
+    }
 
     // ESPN flags the interval with a halftime status; treat that as PAUSED and
     // everything else in-play. displayClock looks like "67'" — grab the minute.
@@ -187,6 +230,8 @@ async function fetchLiveScores() {
       date: ev.date,
       homeScore: toScore(home.score),
       awayScore: toScore(away.score),
+      penalties,
+      winner: penWinner,
       minute: paused ? null : clockMatch ? Number(clockMatch[1]) : null,
       status: paused ? "PAUSED" : "IN_PLAY",
     });
@@ -269,30 +314,59 @@ function matchKey(homeName, awayName, dateIso) {
 }
 
 // Overlay live scores (and carried-forward finals) onto the football-data
-// matches. football-data's own FINISHED result always wins once it lands.
+// matches. football-data's own FINISHED result is authoritative — except for
+// penalty shootouts, where it's unreliable (folds the shootout into the score,
+// leaves winner null), so an ESPN shootout final corrects it and that
+// correction is persisted via the previous payload.
 function mergeLive(fdMatches, liveList, prevMatches, fetchedLive) {
   const liveByKey = {};
   for (const lv of liveList) liveByKey[matchKey(lv.home, lv.away, lv.date)] = lv;
 
   const prevByKey = {};
+  // Shootout corrections we've already stored, so they survive once the game
+  // drops off ESPN's scoreboard (football-data never fixes its own record).
+  const prevPenByKey = {};
   for (const pm of prevMatches || []) {
-    if (pm._live || pm._carried)
-      prevByKey[matchKey(pm.home?.name, pm.away?.name, pm.utcDate)] = pm;
+    const k = matchKey(pm.home?.name, pm.away?.name, pm.utcDate);
+    if (pm._live || pm._carried) prevByKey[k] = pm;
+    if (pm.penalties) prevPenByKey[k] = pm;
   }
 
   return fdMatches.map((m) => {
-    if (m.status === "FINISHED") return m; // official final is authoritative
     const key = matchKey(m.home?.name, m.away?.name, m.utcDate);
+
+    if (m.status === "FINISHED") {
+      // Apply a shootout correction from ESPN (this tick) or a persisted one.
+      const fix = (liveByKey[key] && liveByKey[key].penalties)
+        ? liveByKey[key]
+        : prevPenByKey[key];
+      if (fix && fix.penalties) {
+        return {
+          ...m,
+          homeScore: fix.homeScore ?? m.homeScore,
+          awayScore: fix.awayScore ?? m.awayScore,
+          penalties: fix.penalties,
+          winner: fix.winner ?? m.winner ?? null,
+        };
+      }
+      return m; // plain final: football-data is authoritative
+    }
 
     const lv = liveByKey[key];
     if (lv) {
+      // ESPN may report a shootout as finished before football-data does; mark
+      // it provisional so pool scoring waits for the official final.
+      const espnFinal = lv.status === "FINISHED";
       return {
         ...m,
         status: lv.status,
         homeScore: lv.homeScore,
         awayScore: lv.awayScore,
-        minute: lv.minute,
-        _live: true,
+        penalties: lv.penalties ?? m.penalties ?? null,
+        winner: lv.winner ?? m.winner ?? null,
+        minute: espnFinal ? null : lv.minute,
+        _live: !espnFinal,
+        _provisional: espnFinal || undefined,
       };
     }
 
@@ -306,6 +380,8 @@ function mergeLive(fdMatches, liveList, prevMatches, fetchedLive) {
           status: pv.status,
           homeScore: pv.homeScore,
           awayScore: pv.awayScore,
+          penalties: pv.penalties ?? null,
+          winner: pv.winner ?? m.winner ?? null,
           minute: pv.minute ?? null,
           _live: pv._live,
           _carried: pv._carried,
@@ -323,6 +399,8 @@ function mergeLive(fdMatches, liveList, prevMatches, fetchedLive) {
           status: "FINISHED",
           homeScore: pv.homeScore,
           awayScore: pv.awayScore,
+          penalties: pv.penalties ?? null,
+          winner: pv.winner ?? m.winner ?? null,
           minute: null,
           _carried: true,
           _carriedTs: carriedTs,
@@ -390,18 +468,38 @@ async function main() {
     console.error("sync-results: scorers fetch failed:", e.message);
   }
 
-  // Only poll the live feed when a match is plausibly in progress (kickoff
-  // window). ESPN is free and keyless with no daily cap, so unlike the old
-  // api-football path there's no throttle — every in-window run fetches.
+  // Poll the live feed when a match is plausibly in progress (kickoff window).
+  // ESPN is free and keyless with no daily cap, so unlike the old api-football
+  // path there's no throttle — every in-window run fetches.
   const now = Date.now();
   const inWindow = fdMatches.some((m) => {
     const ko = new Date(m.utcDate).getTime();
     return now >= ko - 5 * 60000 && now <= ko + 150 * 60000;
   });
 
+  // Also fetch when football-data shows a finished knockout game with no winner
+  // — its tell-tale for an unhandled penalty shootout — that we haven't already
+  // corrected and persisted. This catches shootouts whose result lands after
+  // the live window closes.
+  const KO_STAGES = new Set([
+    "LAST_32", "LAST_16", "QUARTER_FINALS", "SEMI_FINALS", "THIRD_PLACE", "FINAL",
+  ]);
+  const prevPenKeys = new Set(
+    ((prev && prev.matches) || [])
+      .filter((m) => m.penalties)
+      .map((m) => matchKey(m.home?.name, m.away?.name, m.utcDate))
+  );
+  const needsShootoutFix = fdMatches.some(
+    (m) =>
+      KO_STAGES.has(m.stage) &&
+      m.status === "FINISHED" &&
+      m.winner == null &&
+      !prevPenKeys.has(matchKey(m.home?.name, m.away?.name, m.utcDate))
+  );
+
   let liveList = [];
   let fetchedLive = false;
-  if (inWindow) {
+  if (inWindow || needsShootoutFix) {
     try {
       liveList = await fetchLiveScores();
       fetchedLive = true;

@@ -400,6 +400,14 @@ async function fetchEspnScores() {
     if (!home || !away) continue;
     const teamName = (c) => (c.team && (c.team.displayName || c.team.name)) || null;
     const toScore = (s) => (s == null || s === "" ? null : Number(s));
+    // Penalty shootout tally, when ESPN reports one (knockout draws decided on
+    // pens). Derive the winner from it so the bracket can highlight the advancer.
+    const penH = toScore(home.shootoutScore);
+    const penA = toScore(away.shootoutScore);
+    const penalties = penH != null || penA != null ? { home: penH, away: penA } : null;
+    const penWinner = penalties
+      ? penH > penA ? "HOME" : penA > penH ? "AWAY" : null
+      : null;
     if (state === "post") {
       out.push({
         home: teamName(home),
@@ -407,6 +415,8 @@ async function fetchEspnScores() {
         date: ev.date,
         homeScore: toScore(home.score),
         awayScore: toScore(away.score),
+        penalties,
+        winner: penWinner,
         minute: null,
         status: "FINISHED",
         _espnProvisional: true,
@@ -421,6 +431,8 @@ async function fetchEspnScores() {
         date: ev.date,
         homeScore: toScore(home.score),
         awayScore: toScore(away.score),
+        penalties,
+        winner: penWinner,
         minute: paused ? null : clockMatch ? Number(clockMatch[1]) : null,
         status: paused ? "PAUSED" : "IN_PLAY",
       });
@@ -445,9 +457,9 @@ function applyEspnOverlay(baseMatches, espnScores) {
     const lv = byKey[key];
     if (!lv) return m;
     if (lv.status === "FINISHED") {
-      return { ...m, status: "FINISHED", homeScore: lv.homeScore, awayScore: lv.awayScore, minute: null, _espnProvisional: true };
+      return { ...m, status: "FINISHED", homeScore: lv.homeScore, awayScore: lv.awayScore, penalties: lv.penalties ?? m.penalties ?? null, winner: lv.winner ?? m.winner ?? null, minute: null, _espnProvisional: true };
     }
-    return { ...m, status: lv.status, homeScore: lv.homeScore, awayScore: lv.awayScore, minute: lv.minute, _live: true };
+    return { ...m, status: lv.status, homeScore: lv.homeScore, awayScore: lv.awayScore, penalties: lv.penalties ?? m.penalties ?? null, winner: lv.winner ?? m.winner ?? null, minute: lv.minute, _live: true };
   });
 }
 
@@ -2955,31 +2967,68 @@ function ForecastView({ live, locked, results }) {
 
 // ---------- Results (live feed) ----------
 
+// A knockout slot the feed hasn't resolved yet. ESPN names these with
+// placeholder codes (RD32, RD16 W1, QFW1, QW4, SFW2…) or "Round of N" text.
+function isPlaceholderSlot(side) {
+  return (
+    !side ||
+    /^(RD|QF?W|SF?W|FW?)\d/i.test(side.code || "") ||
+    /round of \d+/i.test(side.name || "")
+  );
+}
+
+// Which side advances from a knockout match, or null if undecided. Trusts the
+// `winner` field (so shootouts resolve correctly) before the raw score.
+function knockoutWinSide(m) {
+  if (!m) return null;
+  if (m.winner === "HOME" || m.winner === "AWAY") return m.winner;
+  const decided =
+    m.status === "FINISHED" && m.homeScore != null && m.awayScore != null;
+  if (!decided) return null;
+  if (m.homeScore > m.awayScore) return "HOME";
+  if (m.awayScore > m.homeScore) return "AWAY";
+  return null;
+}
+
+// The team object that advances from a match, resolving placeholder sides to a
+// derived seat (the winner fed in from the previous round). Null if undecided.
+function knockoutWinner(m, seat) {
+  const side = knockoutWinSide(m);
+  if (side === "HOME") return !isPlaceholderSlot(m.home) ? m.home : (seat && seat.home) || null;
+  if (side === "AWAY") return !isPlaceholderSlot(m.away) ? m.away : (seat && seat.away) || null;
+  return null;
+}
+
 // One match card in the knockout bracket. Compact: just flag + team code + score.
-// Click to expand and reveal date, venue, and city.
-function KnockoutMatchCard({ m }) {
+// Click to expand and reveal date, venue, and city. `seat` carries the teams
+// derived from the previous round's winners, used to fill a slot the feed
+// hasn't populated yet (so winners advance even before the provider slots them).
+function KnockoutMatchCard({ m, seat }) {
   const [open, setOpen] = useState(false);
   const done = m.status === "FINISHED";
   const inPlay = m.status === "IN_PLAY" || m.status === "PAUSED";
   const hasScore = (done || inPlay) && m.homeScore != null && m.awayScore != null;
-  const hWins = hasScore && m.homeScore > m.awayScore;
-  const aWins = hasScore && m.awayScore > m.homeScore;
-  const hId = liveTeamToId(m.home && m.home.code, m.home && m.home.name);
-  const aId = liveTeamToId(m.away && m.away.code, m.away && m.away.name);
-  // ESPN placeholder codes for unresolved slots: RD32, RD16 W1, QFW1, QW4, SFW2…
-  const isPlaceholder = (side) =>
-    !side ||
-    /^(RD|QF?W|SF?W|FW?)\d/i.test(side.code || "") ||
-    /round of \d+/i.test(side.name || "");
-  const resolveName = (side) => {
-    if (isPlaceholder(side)) return null;
-    return (side && (side.code || side.name)) || null;
-  };
-  const hName = resolveName(m.home);
-  const aName = resolveName(m.away);
+  // A knockout draw decided on penalties: regulation/extra-time stays level, so
+  // trust the `winner` field (which reflects the shootout) before the raw score.
+  const pens = m.penalties && (m.penalties.home != null || m.penalties.away != null)
+    ? m.penalties
+    : null;
+  const winSide = knockoutWinSide(m);
+  const hWins = winSide === "HOME";
+  const aWins = winSide === "AWAY";
+  // Use the feed's own team when it's resolved; otherwise fall back to the seat
+  // derived from the prior round (a future matchup not yet slotted by the feed).
+  const hSide = !isPlaceholderSlot(m.home) ? m.home : (seat && seat.home) || null;
+  const aSide = !isPlaceholderSlot(m.away) ? m.away : (seat && seat.away) || null;
+  const hId = liveTeamToId(hSide && hSide.code, hSide && hSide.name);
+  const aId = liveTeamToId(aSide && aSide.code, aSide && aSide.name);
+  const resolveName = (side) =>
+    isPlaceholderSlot(side) ? null : (side && (side.code || side.name)) || null;
+  const hName = resolveName(hSide);
+  const aName = resolveName(aSide);
   const hasDetail = !!(m.utcDate || m.venue);
 
-  const TeamRow = ({ id, name, score, wins }) => (
+  const TeamRow = ({ id, name, score, pen, wins }) => (
     <div className={"flex items-center justify-between gap-1 px-1.5 py-1 " + (wins ? "bg-emerald-50" : "")}>
       <span className={"flex items-center gap-1 min-w-0 " + (wins ? "font-bold text-stone-800" : "text-stone-500")}>
         {name ? (
@@ -2994,6 +3043,7 @@ function KnockoutMatchCard({ m }) {
       {hasScore && (
         <span className={"font-mono text-[11px] shrink-0 " + (wins ? "font-bold text-stone-800" : "text-stone-400")}>
           {score}
+          {pen != null && <span className="ml-0.5 text-stone-400">({pen})</span>}
         </span>
       )}
     </div>
@@ -3012,12 +3062,12 @@ function KnockoutMatchCard({ m }) {
         onClick={hasDetail ? () => setOpen((v) => !v) : undefined}
         className={"w-full text-left " + (hasDetail ? "cursor-pointer" : "cursor-default")}
       >
-        <TeamRow id={hId} name={hName} score={m.homeScore} wins={hWins} />
+        <TeamRow id={hId} name={hName} score={m.homeScore} pen={pens ? pens.home : null} wins={hWins} />
         <div className="border-t border-stone-100" />
-        <TeamRow id={aId} name={aName} score={m.awayScore} wins={aWins} />
+        <TeamRow id={aId} name={aName} score={m.awayScore} pen={pens ? pens.away : null} wins={aWins} />
         {(done || inPlay) && (
           <div className={"text-center text-[9px] py-0.5 " + (inPlay ? "text-red-600 font-bold" : "text-stone-300")}>
-            {inPlay ? (m.minute ? `${m.minute}'` : "LIVE") : "FT"}
+            {inPlay ? (m.minute ? `${m.minute}'` : "LIVE") : pens ? "FT · pens" : "FT"}
           </div>
         )}
       </button>
@@ -3102,27 +3152,55 @@ function KnockoutBracket({ matches }) {
     return out;
   }, [matches]);
 
-  // Lay a round's matches into its fixed slots by bracket position. Matches whose
-  // teams are still TBD (no position) drop into whatever slots remain; empty
-  // slots become TBD placeholders. Returns an array of length `count`.
-  const placeRound = (round) => {
-    const slots = new Array(round.count).fill(null);
-    const leftovers = [];
-    for (const m of byRound[round.key]) {
-      const pos = bracketPosition(m, round.depth);
-      if (pos != null && pos >= 0 && pos < round.count && slots[pos] == null) {
-        slots[pos] = m;
-      } else {
-        leftovers.push(m);
+  // Place every round into its fixed slots, then derive the teams for each slot
+  // from the previous round's winners. The feed is slow to slot advancing teams
+  // (and can't slot shootout winners at all, since it leaves winner null), so we
+  // compute advancement ourselves: each round's seats = the winners feeding in
+  // from the two matches below it in the prior round.
+  const { placed, seats } = useMemo(() => {
+    const placed = {};
+    KO_STRUCTURE.forEach((round) => {
+      const slots = new Array(round.count).fill(null);
+      const leftovers = [];
+      for (const m of byRound[round.key]) {
+        const pos = bracketPosition(m, round.depth);
+        if (pos != null && pos >= 0 && pos < round.count && slots[pos] == null) {
+          slots[pos] = m;
+        } else {
+          leftovers.push(m);
+        }
       }
-    }
-    for (let i = 0; i < slots.length && leftovers.length; i++) {
-      if (slots[i] == null) slots[i] = leftovers.shift();
-    }
-    return slots.map(
-      (m, i) => m || { id: `tbd-${round.key}-${i}`, status: "SCHEDULED" }
-    );
-  };
+      for (let i = 0; i < slots.length && leftovers.length; i++) {
+        if (slots[i] == null) slots[i] = leftovers.shift();
+      }
+      placed[round.key] = slots.map(
+        (m, i) => m || { id: `tbd-${round.key}-${i}`, status: "SCHEDULED" }
+      );
+    });
+
+    // Walk R32→Final: derive this round's seats from the previous round's
+    // winners, then compute this round's winners (seats fill any slot the feed
+    // hasn't resolved). A future matchup with an unplayed feeder yields no
+    // winner, so propagation naturally stops at the latest completed round.
+    const seats = {};
+    let prevWinners = null;
+    KO_STRUCTURE.forEach((round) => {
+      const roundSeats = new Array(round.count).fill(null);
+      if (prevWinners) {
+        for (let i = 0; i < round.count; i++) {
+          roundSeats[i] = {
+            home: prevWinners[2 * i] || null,
+            away: prevWinners[2 * i + 1] || null,
+          };
+        }
+      }
+      seats[round.key] = roundSeats;
+      prevWinners = placed[round.key].map((m, i) =>
+        knockoutWinner(m, roundSeats[i])
+      );
+    });
+    return { placed, seats };
+  }, [byRound]);
 
   // Only render once the feed has at least one knockout match.
   if (!KO_STRUCTURE.some((r) => byRound[r.key].length > 0)) return null;
@@ -3135,7 +3213,8 @@ function KnockoutBracket({ matches }) {
       <div className="overflow-x-auto -mx-4 px-4">
         <div className="flex gap-2 pb-1">
           {KO_STRUCTURE.map((round) => {
-            const items = placeRound(round);
+            const items = placed[round.key];
+            const roundSeats = seats[round.key];
             const isFinal = round.key === "f";
             const tp = isFinal ? byRound["tp"] : null;
             const tpMatch = tp && tp.length > 0
@@ -3149,8 +3228,8 @@ function KnockoutBracket({ matches }) {
                   {round.label}
                 </div>
                 <div className="flex flex-col justify-around flex-1 gap-1">
-                  {items.map((m) => (
-                    <KnockoutMatchCard key={m.id} m={m} />
+                  {items.map((m, i) => (
+                    <KnockoutMatchCard key={m.id} m={m} seat={roundSeats && roundSeats[i]} />
                   ))}
                 </div>
                 {tpMatch && (
