@@ -694,14 +694,19 @@ function isEliminated(r) {
   return !!(r && (r.finish === "out" || r.koEliminated));
 }
 
-// Team IDs that lost a finished knockout match, read straight from the live
-// feed. This makes the crossed-out styling immediate — it doesn't wait for the
-// commissioner to Sync-from-live + Save (group-stage "out" still comes from the
-// saved results). Same winner logic as deriveResults, so shootout losers count.
-function koEliminatedSet(live) {
-  const set = new Set();
+// Short round tag shown next to a knockout-eliminated team — how far it got.
+const KO_ROUND_SHORT = { r32: "R32", r16: "R16", qf: "QF", sf: "SF", f: "Final" };
+
+// Map of teamId -> the knockout round it was eliminated in (the match it lost),
+// read straight from the live feed so the styling is immediate without waiting
+// for the commissioner to Sync-from-live + Save. Same winner logic as
+// deriveResults, so shootout losers count. The third-place match is skipped:
+// both its teams already exited at the semifinals, so that's the round shown.
+function koEliminatedMap(live) {
+  const map = {};
   (live && live.matches ? live.matches : []).forEach((mt) => {
-    if (!STAGE_TO_KO[mt.stage] || mt.status !== "FINISHED" || mt._provisional) return;
+    const ko = STAGE_TO_KO[mt.stage];
+    if (!ko || ko === "tp" || mt.status !== "FINISHED" || mt._provisional) return;
     let side = mt.winner; // HOME | AWAY | DRAW | null
     if (side !== "HOME" && side !== "AWAY") {
       if (mt.homeScore != null && mt.awayScore != null) {
@@ -712,9 +717,9 @@ function koEliminatedSet(live) {
     if (side !== "HOME" && side !== "AWAY") return;
     const loser = side === "HOME" ? mt.away : mt.home;
     const lid = liveTeamToId(loser && loser.code, loser && loser.name);
-    if (lid) set.add(lid);
+    if (lid) map[lid] = KO_ROUND_SHORT[ko] || null;
   });
-  return set;
+  return map;
 }
 
 function entryTeamIds(entry) {
@@ -1155,7 +1160,7 @@ function LeaderboardView({ results, settings, locked, live }) {
   const [expanded, setExpanded] = useState(null);
   const [loadError, setLoadError] = useState("");
   const [sortBy, setSortBy] = useState("total"); // "total" | "pct"
-  const koOut = useMemo(() => koEliminatedSet(live), [live]);
+  const koElim = useMemo(() => koEliminatedMap(live), [live]); // teamId -> round tag
 
   const loadEntries = async () => {
     setLoadError("");
@@ -1386,6 +1391,8 @@ function LeaderboardView({ results, settings, locked, live }) {
                   const r = results[id];
                   const pts = teamPoints(r);
                   const c = teamCeiling(id, live);
+                  const koRound = koElim[id] || (r && r.koEliminated ? "KO" : null);
+                  const grpOut = r && r.finish === "out" && !koRound;
                   return (
                     <div
                       key={id}
@@ -1394,7 +1401,9 @@ function LeaderboardView({ results, settings, locked, live }) {
                       <span
                         className={
                           "text-sm " +
-                          (isEliminated(r) || koOut.has(id)
+                          (koRound
+                            ? "text-stone-400"
+                            : grpOut
                             ? "text-stone-400 line-through"
                             : "text-stone-700")
                         }
@@ -1404,6 +1413,11 @@ function LeaderboardView({ results, settings, locked, live }) {
                         </span>
                         <Flag id={id} className="mr-1.5 align-[-2px]" />
                         {tm ? tm.name : id}
+                        {koRound && (
+                          <span className="ml-1.5 text-[9px] font-bold uppercase tracking-wide text-amber-700 bg-amber-50 rounded px-1 py-px align-[1px]">
+                            out · {koRound}
+                          </span>
+                        )}
                         <span className="font-mono text-xs text-stone-400 ml-2">
                           {c.played} GP
                         </span>
@@ -2404,7 +2418,7 @@ function ForecastView({ live, locked, results }) {
   const [expanded, setExpanded] = useState(null); // expanded pool-entry name
   const [showAllMatches, setShowAllMatches] = useState(false);
   const [view, setView] = useState("cup"); // "cup" (tournament) | "pool"
-  const koOut = useMemo(() => koEliminatedSet(live), [live]);
+  const koElim = useMemo(() => koEliminatedMap(live), [live]); // teamId -> round tag
 
   // Teams in a live match right now, to flag them across the projection tables.
   const liveIds = useMemo(() => liveTeamIds(live), [live]);
@@ -2815,18 +2829,25 @@ function ForecastView({ live, locked, results }) {
                     {isOpen && (
                       <div className="pl-7 pr-1 pb-2">
                         {teams.map((t) => {
-                          const eliminated = isEliminated(results[t.id]) || koOut.has(t.id);
+                          const r = results[t.id];
+                          const koRound = koElim[t.id] || (r && r.koEliminated ? "KO" : null);
+                          const grpOut = r && r.finish === "out" && !koRound;
                           return (
                           <div
                             key={t.id}
                             className="flex items-center justify-between py-1"
                           >
-                            <span className={"flex items-center gap-1.5 text-sm min-w-0 " + (eliminated ? "text-stone-400 line-through" : "text-stone-700")}>
+                            <span className={"flex items-center gap-1.5 text-sm min-w-0 " + (koRound ? "text-stone-400" : grpOut ? "text-stone-400 line-through" : "text-stone-700")}>
                               <span className="font-mono text-[11px] text-stone-400">
                                 T{t.tier}
                               </span>
                               <Flag id={t.id} />
                               <span className="truncate">{t.name}</span>
+                              {koRound && (
+                                <span className="shrink-0 text-[9px] font-bold uppercase tracking-wide text-amber-700 bg-amber-50 rounded px-1 py-px">
+                                  out · {koRound}
+                                </span>
+                              )}
                             </span>
                             <span className="font-mono text-xs shrink-0">
                               <span className="text-stone-400">
