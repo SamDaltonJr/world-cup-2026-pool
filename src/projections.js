@@ -184,7 +184,12 @@ function predictMatch(elo, idH, idA, isGroup) {
 // Live win/draw/win probabilities for an in-progress match: only the goals still
 // to come are random (Poisson scaled by minutes left), added onto the current
 // score. The analytic twin of simScorelineLive.
-function predictLive(elo, idH, idA, cur) {
+//
+// For a knockout game (isGroup false) a draw isn't a real outcome — it goes to
+// extra time and penalties — so the draw mass is folded into each side's
+// ADVANCEMENT probability, resolved by the logistic Elo tiebreak (the stronger
+// team is likelier to win the shootout). pH/pA then sum to 1 and pD is 0.
+function predictLive(elo, idH, idA, cur, isGroup = true) {
   const [fullH, fullA] = groupLambdas(elo, idH, idA);
   const rem =
     cur.minute == null
@@ -211,6 +216,10 @@ function predictLive(elo, idH, idA, cur) {
       else if (fh < fa) pA += p;
       else pD += p;
     }
+  }
+  if (!isGroup) {
+    const wp = koWinProb(elo, idH, idA); // ET/penalties tiebreak on a level score
+    return { pH: pH + pD * wp, pD: 0, pA: pA + pD * (1 - wp) };
   }
   return { pH, pD, pA };
 }
@@ -405,6 +414,31 @@ function buildKoResults(live, resolveTeam, stageToKo) {
   return out;
 }
 
+// Knockout matches currently IN PROGRESS, keyed by unordered team pair. Each
+// carries the live score and minute so the simulation keeps what's on the board
+// and only rolls the goals still to come (plus an ET/penalties tiebreak on a
+// level score), instead of replaying the match from 0–0.
+function buildKoLive(live, resolveTeam, stageToKo) {
+  const out = {};
+  const matches = (live && live.matches) || [];
+  matches.forEach((mt) => {
+    if (!stageToKo || !stageToKo[mt.stage]) return;
+    if (mt.status !== "IN_PLAY" && mt.status !== "PAUSED") return;
+    if (mt.homeScore == null || mt.awayScore == null) return;
+    const h = resolveTeam(mt.home && mt.home.code, mt.home && mt.home.name);
+    const a = resolveTeam(mt.away && mt.away.code, mt.away && mt.away.name);
+    if (!h || !a) return;
+    out[[h, a].sort().join("|")] = {
+      h,
+      a,
+      gh: mt.homeScore,
+      ga: mt.awayScore,
+      minute: mt.minute,
+    };
+  });
+  return out;
+}
+
 // Rank a set of teams that are level on overall points, per the 2026 FIFA
 // criteria order. New for this tournament: head-to-head results among the tied
 // teams are applied FIRST (points, then goal difference, then goals), ahead of
@@ -461,16 +495,32 @@ function rankTied(ids, overall, pool, elo) {
   return out;
 }
 
-function koDecide(elo, idA, idB, koResults) {
-  const real = koResults[[idA, idB].sort().join("|")];
+function koDecide(elo, idA, idB, koResults, koLive) {
+  const key = [idA, idB].sort().join("|");
+  const real = koResults[key];
   if (real) return real === idA ? idA : idB;
+  const lv = koLive && koLive[key];
+  if (lv) {
+    // Carry the live score; simulate only the minutes left, then resolve a level
+    // score by the logistic Elo tiebreak (extra time / penalties).
+    const [lamH, lamA] = groupLambdas(elo, lv.h, lv.a);
+    const rem =
+      lv.minute == null ? 0.5 : Math.max(0, Math.min(1, (90 - lv.minute) / 90));
+    const gh = lv.gh + poisson(lamH * rem);
+    const ga = lv.ga + poisson(lamA * rem);
+    let win;
+    if (gh > ga) win = lv.h;
+    else if (ga > gh) win = lv.a;
+    else win = Math.random() < koWinProb(elo, lv.h, lv.a) ? lv.h : lv.a;
+    return win === idA ? idA : idB;
+  }
   return Math.random() < koWinProb(elo, idA, idB) ? idA : idB;
 }
 
 // ---------- One full simulation ----------
 // Mutates the per-team `res` shape ({ gw, gd, finish, ko }) for scoring and
 // returns nothing else; callers score and aggregate from `res`.
-function simulateOnce(elo, groups, koResults, teamIds, bracketAcc) {
+function simulateOnce(elo, groups, koResults, koLive, teamIds, bracketAcc) {
   const res = {};
   teamIds.forEach(
     (id) => (res[id] = { gw: 0, gd: 0, ggd: 0, finish: "out", ko: {} })
@@ -579,7 +629,7 @@ function simulateOnce(elo, groups, koResults, teamIds, bracketAcc) {
     // Resolve whichever side is the third-place slot.
     const teamA = mt.a.t === "3" ? groupRank[thirdAssign[mt.m]][2].id : a;
     const teamB = mt.b.t === "3" ? groupRank[thirdAssign[mt.m]][2].id : b;
-    const w = koDecide(elo, teamA, teamB, koResults);
+    const w = koDecide(elo, teamA, teamB, koResults, koLive);
     winners[mt.m] = w;
     res[w].ko.r32 = true;
     if (rec) rec(mt.m, teamA, teamB, w);
@@ -589,7 +639,7 @@ function simulateOnce(elo, groups, koResults, teamIds, bracketAcc) {
     LATER_ROUNDS[round].forEach((mt) => {
       const teamA = winners[mt.a];
       const teamB = winners[mt.b];
-      const w = koDecide(elo, teamA, teamB, koResults);
+      const w = koDecide(elo, teamA, teamB, koResults, koLive);
       winners[mt.m] = w;
       res[w].ko[koPoint[round]] = true;
       if (rec) rec(mt.m, teamA, teamB, w);
@@ -606,11 +656,11 @@ function simulateOnce(elo, groups, koResults, teamIds, bracketAcc) {
     const w = winners[mt.m];
     return { loser: w === teamA ? teamB : teamA };
   });
-  const tpWin = koDecide(elo, sfPairs[0].loser, sfPairs[1].loser, koResults);
+  const tpWin = koDecide(elo, sfPairs[0].loser, sfPairs[1].loser, koResults, koLive);
   res[tpWin].ko.tp = true;
   if (rec) rec(103, sfPairs[0].loser, sfPairs[1].loser, tpWin);
 
-  const champ = koDecide(elo, winners[101], winners[102], koResults);
+  const champ = koDecide(elo, winners[101], winners[102], koResults, koLive);
   res[champ].ko.f = true;
   if (rec) rec(104, winners[101], winners[102], champ);
 
@@ -636,6 +686,8 @@ export function projectTournament(opts) {
 
   const teamIds = Object.keys(TEAM_ELO);
   const koResults = buildKoResults(live, resolveTeam, stageToKo);
+  // In-progress knockout games, so the bracket odds reflect the live score.
+  const koLive = buildKoLive(live, resolveTeam, stageToKo);
   // Current ratings: the snapshot updated by every match already played.
   const elo = liveElo(live, resolveTeam, stageToKo);
 
@@ -689,11 +741,13 @@ export function projectTournament(opts) {
         homeScore: m.homeScore,
         awayScore: m.awayScore,
         isGroup: m.stage === "GROUP_STAGE",
-        ...predictLive(elo, h, a, {
-          gh: m.homeScore,
-          ga: m.awayScore,
-          minute: m.minute,
-        }),
+        ...predictLive(
+          elo,
+          h,
+          a,
+          { gh: m.homeScore, ga: m.awayScore, minute: m.minute },
+          m.stage === "GROUP_STAGE"
+        ),
       };
     })
     .filter(Boolean)
@@ -715,7 +769,7 @@ export function projectTournament(opts) {
   const bracketAcc = {};
 
   for (let s = 0; s < sims; s++) {
-    const res = simulateOnce(elo, groups, koResults, teamIds, bracketAcc);
+    const res = simulateOnce(elo, groups, koResults, koLive, teamIds, bracketAcc);
     const ptsByTeam = {};
     teamIds.forEach((id) => {
       const r = res[id];
