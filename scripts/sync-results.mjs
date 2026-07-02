@@ -516,6 +516,24 @@ async function main() {
   );
 
   const liveCount = matches.filter((m) => m._live).length;
+
+  // Whether this run should keep tight-polling. The workflow enters a ~55-min
+  // 5-minute loop, but there's no point looping when no match is on or near.
+  // "Active" = a match is live, in its kickoff window, or starting within the
+  // next couple of hours (a lead comfortably larger than the worst-case cron
+  // gap, so we're already looping before kickoff and never miss the start).
+  // Otherwise the run does this one sync and exits, and the hourly-ish cron
+  // restarts it — plenty for standings/finals between matches. Also stay active
+  // when a shootout still needs correcting, so we don't drop it after one pass.
+  const HORIZON_MS = 2 * 60 * 60 * 1000;
+  const active =
+    liveCount > 0 ||
+    needsShootoutFix ||
+    fdMatches.some((m) => {
+      const ko = new Date(m.utcDate).getTime();
+      return now >= ko - HORIZON_MS && now <= ko + 150 * 60000;
+    });
+
   const payload = {
     updatedAt: new Date().toISOString(),
     // Timestamp of the last successful live poll (informational).
@@ -531,8 +549,15 @@ async function main() {
   console.log(
     `sync-results: stored ${matches.length} matches (${liveCount} live), ` +
       `${standings.length} group tables, ${scorers.length} scorers. ` +
-      `window=${inWindow} fetchedLive=${fetchedLive}`
+      `window=${inWindow} fetchedLive=${fetchedLive} active=${active}`
   );
+  return active;
 }
 
-main().catch((err) => die(err.message || String(err)));
+// Exit 0 = active (workflow keeps looping), 3 = idle (workflow stops looping
+// and lets the next scheduled run restart it). die() still exits 1 on error,
+// which the workflow treats as a transient failure and keeps looping.
+const IDLE_EXIT = 3;
+main()
+  .then((active) => process.exit(active ? 0 : IDLE_EXIT))
+  .catch((err) => die(err.message || String(err)));

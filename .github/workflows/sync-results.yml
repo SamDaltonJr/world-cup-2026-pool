@@ -8,10 +8,11 @@ name: Sync live results
 on:
   # GitHub's scheduled runs are best-effort and, under load, often fire only
   # ~once an hour rather than every 5 minutes. So rather than trust the cron for
-  # cadence, each run self-polls every 5 minutes for ~55 minutes (see the loop
-  # below). The schedule just needs to start a run roughly each hour; with the
-  # single-flight concurrency below, runs queue back-to-back for continuous
-  # coverage during matches.
+  # cadence, each run self-polls every 5 minutes for up to ~55 minutes (see the
+  # loop below) WHILE a match is live or imminent; when nothing is on it does one
+  # sync and exits immediately. The schedule just needs to start a run roughly
+  # each hour; with the single-flight concurrency below, runs queue back-to-back
+  # for continuous coverage during matches while staying idle between them.
   schedule:
     - cron: "*/5 * * * *"
   # Lets you run it on demand from the Actions tab.
@@ -50,7 +51,15 @@ jobs:
         run: |
           deadline=$((SECONDS + 3300)) # ~55 minutes
           while :; do
-            node scripts/sync-results.mjs || echo "sync iteration failed (continuing)"
+            node scripts/sync-results.mjs; code=$?
+            # Exit 3 = nothing live or imminent: stop looping and let the next
+            # scheduled run restart us. Any other non-zero is a transient error
+            # we keep looping through. Exit 0 = active, keep the 5-min cadence.
+            if [ "$code" -eq 3 ]; then
+              echo "no live or imminent matches — exiting early"
+              break
+            fi
+            if [ "$code" -ne 0 ]; then echo "sync iteration failed (continuing)"; fi
             if [ "$SECONDS" -ge "$deadline" ]; then break; fi
             sleep 300 # 5 minutes
           done
