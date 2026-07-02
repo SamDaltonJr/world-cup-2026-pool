@@ -2953,8 +2953,8 @@ function ForecastView({ live, locked, results }) {
                                 </span>
                               </div>
                               <p className="text-[11px] text-stone-400 mb-1.5">
-                                Your win odds if each scenario happens — the % is
-                                how often {e.name} takes the pool given it.
+                                Muted % = the scenario&apos;s own chance; bold % =
+                                how often {e.name} wins the pool if it happens.
                               </p>
                               {e.rooting.for.length > 0 && (
                                 <div className="flex items-start gap-2 mb-1.5">
@@ -2975,6 +2975,12 @@ function ForecastView({ live, locked, results }) {
                                           </span>
                                           <span className="text-stone-500">
                                             wins cup
+                                          </span>
+                                          <span className="font-mono text-stone-400">
+                                            {pct(s.prob)}
+                                          </span>
+                                          <span className="font-mono text-stone-300">
+                                            →
                                           </span>
                                           <span className="font-mono font-bold text-emerald-700">
                                             {pct(s.cond)}
@@ -3004,6 +3010,12 @@ function ForecastView({ live, locked, results }) {
                                           </span>
                                           <span className="text-stone-500">
                                             out before QF
+                                          </span>
+                                          <span className="font-mono text-stone-400">
+                                            {pct(s.prob)}
+                                          </span>
+                                          <span className="font-mono text-stone-300">
+                                            →
                                           </span>
                                           <span className="font-mono font-bold text-rose-700">
                                             {pct(s.cond)}

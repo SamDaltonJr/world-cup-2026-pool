@@ -911,16 +911,17 @@ export function projectTournament(opts) {
     ["r16", "reaches R16"],
     ["adv", "advances"],
   ];
-  // A circumstance only earns a spot in the rooting guide if it (a) happens
-  // often enough for a stable conditional and (b) moves the entry's odds by a
-  // meaningful amount. The low occurrence floor is deliberate: the biggest
-  // "root against" levers are rare eliminations of strong teams (a favorite
-  // busting in the group stage is only a few percent likely but hugely
-  // swingy), while the lift bar screens out both true flukes — a longshot
-  // lifting the cup — and non-differentiating near-certainties, like a minnow's
-  // group exit that dents everyone equally.
-  const MIN_OCC = 0.01; // circumstance must occur in ≥1% of sims (≥100 of 10k)
-  const MIN_LIFT = 0.02; // and lift the entry's win odds by ≥2 points
+  // A scenario only earns a spot in the rooting guide if it (a) is genuinely in
+  // play — neither a fluke nor a near-certainty — and (b) moves the entry's odds
+  // by a meaningful amount. The probability BAND is what makes it a "rooting"
+  // guide: you can't root for something that essentially always happens (a
+  // minnow's early exit is 80% likely and dents everyone equally — the default,
+  // not a hope) any more than for a moonshot. Survivors are then ranked by
+  // expected excess winning-worlds (lift × probability), so realistic high-impact
+  // scenarios lead while rare-but-swingy longshots place behind them.
+  const MIN_OCC = 0.01; // scenario must occur in ≥1% of sims (≥100 of 10k)
+  const MAX_OCC = 0.6; // …and in ≤60%: above that it's the expected case, not a hope
+  const MIN_LIFT = 0.02; // and must lift the entry's win odds by ≥2 points
   const entryOut = entries.map((e, i) => {
     const cw = eAcc[i].wins;
     const cond = eAcc[i].cond;
@@ -956,22 +957,25 @@ export function projectTournament(opts) {
             .slice(0, 3)
         : [];
 
-    // Rooting guide: circumstances (a team wins the cup, or a team is out in the
-    // group stage) sorted by how far they lift THIS entry's win odds above its
-    // baseline. `cond` is P(entry wins | circumstance) — the number to show; the
-    // sort uses the lift over baseline so we surface the circumstances that
-    // matter most, not just those correlated with an already-strong entry.
+    // Rooting guide: scenarios (a team wins the cup, or a team is out before the
+    // QF) scored for THIS entry. Each carries `prob` (how often the scenario
+    // happens) and `cond` = P(entry wins | scenario), the intuitive number to
+    // show. After the in-play probability band, survivors are ranked by EXCESS =
+    // lift × prob — the expected extra winning-worlds a scenario contributes — so
+    // realistic high-impact scenarios lead and rare-but-swingy ones place behind.
     const baseline = cw / sims;
     const rank = (occOf, winsOf) =>
       teamIds
         .map((id) => {
-          const occ = occOf(id); // sims in which the circumstance held
-          if (occ / sims < MIN_OCC) return null;
-          const cprob = (winsOf(id) || 0) / occ; // P(entry wins | circumstance)
-          return { id, cond: cprob, lift: cprob - baseline };
+          const occ = occOf(id); // sims in which the scenario held
+          const prob = occ / sims; // the scenario's own probability
+          if (prob < MIN_OCC || prob > MAX_OCC) return null;
+          const cond = (winsOf(id) || 0) / occ; // P(entry wins | scenario)
+          const lift = cond - baseline;
+          return { id, cond, prob, lift, excess: lift * prob };
         })
         .filter((x) => x && x.lift >= MIN_LIFT)
-        .sort((a, b) => b.lift - a.lift)
+        .sort((a, b) => b.excess - a.excess)
         .slice(0, 2);
     const rooting =
       cw >= 3
