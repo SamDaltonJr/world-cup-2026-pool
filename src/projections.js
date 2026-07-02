@@ -766,13 +766,28 @@ export function projectTournament(opts) {
   // Per-entry accumulators. `cond` accumulates, only over the sims where THIS
   // entry wins the pool, how far each of its teams advanced and how many points
   // it scored — so we can later describe the scenario that carries the entry.
-  const eAcc = entries.map(() => ({ totalSum: 0, wins: 0, cond: {} }));
+  // `champWins`/`bustWins` accumulate, per team, this entry's (tie-weighted)
+  // win credit in the sims where that team is champion / is out in the group
+  // stage — the raw material for a "rooting guide" (root for / root against).
+  const eAcc = entries.map(() => ({
+    totalSum: 0,
+    wins: 0,
+    cond: {},
+    champWins: {},
+    bustWins: {},
+  }));
+  // Global (entry-independent) count of sims in which each team is knocked out
+  // before the quarterfinals — the denominator for the "root against"
+  // conditional. (The champion denominator reuses acc[id].champ.)
+  const bustOcc = {};
   // Per-knockout-slot occupancy, filled by simulateOnce each run.
   const bracketAcc = {};
 
   for (let s = 0; s < sims; s++) {
     const res = simulateOnce(elo, groups, koResults, koLive, teamIds, bracketAcc);
     const ptsByTeam = {};
+    let champId = null; // the tournament winner in this sim (for the rooting guide)
+    const bustIds = entries.length ? [] : null; // teams out before the QF
     teamIds.forEach((id) => {
       const r = res[id];
       const pts = scorePoints(r);
@@ -791,7 +806,14 @@ export function projectTournament(opts) {
       if (r.ko.r16) a.qf++;
       if (r.ko.qf) a.sf++;
       if (r.ko.sf) a.final++; // won SF => reached final
-      if (r.ko.f) a.champ++;
+      if (r.ko.f) { a.champ++; champId = id; }
+      // "Bust" = knocked out before the quarterfinals (never won an R16 match).
+      // More frequent and more concentrated than a group-stage exit, so a
+      // rival's anchor flaming out actually swings a specific entry's odds.
+      if (bustIds && !r.ko.r16) {
+        bustIds.push(id);
+        bustOcc[id] = (bustOcc[id] || 0) + 1;
+      }
     });
 
     if (entries.length) {
@@ -827,6 +849,15 @@ export function projectTournament(opts) {
           if (r.finish !== "out") c.adv += wgt; // reached the knockout stage
           c.pts += wgt * (ptsByTeam[id] || 0);
         });
+        // Credit this win to the circumstances that held: which team is champion
+        // (root FOR), and every team knocked out before the QF (root AGAINST).
+        // Denominators are the global occurrence counts above.
+        if (champId) {
+          eAcc[i].champWins[champId] = (eAcc[i].champWins[champId] || 0) + wgt;
+        }
+        for (const id of bustIds) {
+          eAcc[i].bustWins[id] = (eAcc[i].bustWins[id] || 0) + wgt;
+        }
       });
     }
   }
@@ -880,6 +911,16 @@ export function projectTournament(opts) {
     ["r16", "reaches R16"],
     ["adv", "advances"],
   ];
+  // A circumstance only earns a spot in the rooting guide if it (a) happens
+  // often enough for a stable conditional and (b) moves the entry's odds by a
+  // meaningful amount. The low occurrence floor is deliberate: the biggest
+  // "root against" levers are rare eliminations of strong teams (a favorite
+  // busting in the group stage is only a few percent likely but hugely
+  // swingy), while the lift bar screens out both true flukes — a longshot
+  // lifting the cup — and non-differentiating near-certainties, like a minnow's
+  // group exit that dents everyone equally.
+  const MIN_OCC = 0.01; // circumstance must occur in ≥1% of sims (≥100 of 10k)
+  const MIN_LIFT = 0.02; // and lift the entry's win odds by ≥2 points
   const entryOut = entries.map((e, i) => {
     const cw = eAcc[i].wins;
     const cond = eAcc[i].cond;
@@ -914,11 +955,41 @@ export function projectTournament(opts) {
             .sort((a, b) => b.swing - a.swing)
             .slice(0, 3)
         : [];
+
+    // Rooting guide: circumstances (a team wins the cup, or a team is out in the
+    // group stage) sorted by how far they lift THIS entry's win odds above its
+    // baseline. `cond` is P(entry wins | circumstance) — the number to show; the
+    // sort uses the lift over baseline so we surface the circumstances that
+    // matter most, not just those correlated with an already-strong entry.
+    const baseline = cw / sims;
+    const rank = (occOf, winsOf) =>
+      teamIds
+        .map((id) => {
+          const occ = occOf(id); // sims in which the circumstance held
+          if (occ / sims < MIN_OCC) return null;
+          const cprob = (winsOf(id) || 0) / occ; // P(entry wins | circumstance)
+          return { id, cond: cprob, lift: cprob - baseline };
+        })
+        .filter((x) => x && x.lift >= MIN_LIFT)
+        .sort((a, b) => b.lift - a.lift)
+        .slice(0, 2);
+    const rooting =
+      cw >= 3
+        ? {
+            baseline,
+            // Root FOR: sims where this team is champion.
+            for: rank((id) => acc[id].champ, (id) => eAcc[i].champWins[id]),
+            // Root AGAINST: sims where this team is out before the quarterfinals.
+            against: rank((id) => bustOcc[id] || 0, (id) => eAcc[i].bustWins[id]),
+          }
+        : { baseline, for: [], against: [] };
+
     return {
       name: e.name,
       projTotal: eAcc[i].totalSum / sims,
       winProb: cw / sims,
       winScenario,
+      rooting,
     };
   });
 

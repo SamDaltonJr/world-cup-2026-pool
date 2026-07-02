@@ -2940,6 +2940,82 @@ function ForecastView({ live, locked, results }) {
                             </div>
                           </div>
                         )}
+                        {e.rooting &&
+                          (e.rooting.for.length > 0 ||
+                            e.rooting.against.length > 0) && (
+                            <div className="mt-2 pt-2 border-t border-stone-100">
+                              <div className="flex items-center justify-between mb-1.5">
+                                <span className="text-[11px] font-bold uppercase tracking-wide text-stone-400">
+                                  Rooting guide
+                                </span>
+                                <span className="text-xs font-mono text-stone-400">
+                                  {pct(e.winProb)} baseline
+                                </span>
+                              </div>
+                              <p className="text-[11px] text-stone-400 mb-1.5">
+                                Your win odds if each scenario happens — the % is
+                                how often {e.name} takes the pool given it.
+                              </p>
+                              {e.rooting.for.length > 0 && (
+                                <div className="flex items-start gap-2 mb-1.5">
+                                  <span className="w-16 shrink-0 text-[10px] font-bold uppercase tracking-wide text-emerald-700 mt-1">
+                                    Root for
+                                  </span>
+                                  <div className="flex flex-wrap gap-1.5">
+                                    {e.rooting.for.map((s) => {
+                                      const tm = ALL_TEAMS[s.id];
+                                      return (
+                                        <span
+                                          key={s.id}
+                                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg border border-emerald-200 bg-emerald-50 text-xs"
+                                        >
+                                          <Flag id={s.id} />
+                                          <span className="font-semibold text-stone-700">
+                                            {tm ? tm.name : s.id}
+                                          </span>
+                                          <span className="text-stone-500">
+                                            wins cup
+                                          </span>
+                                          <span className="font-mono font-bold text-emerald-700">
+                                            {pct(s.cond)}
+                                          </span>
+                                        </span>
+                                      );
+                                    })}
+                                  </div>
+                                </div>
+                              )}
+                              {e.rooting.against.length > 0 && (
+                                <div className="flex items-start gap-2">
+                                  <span className="w-16 shrink-0 text-[10px] font-bold uppercase tracking-wide text-rose-700 mt-1">
+                                    Root against
+                                  </span>
+                                  <div className="flex flex-wrap gap-1.5">
+                                    {e.rooting.against.map((s) => {
+                                      const tm = ALL_TEAMS[s.id];
+                                      return (
+                                        <span
+                                          key={s.id}
+                                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg border border-rose-200 bg-rose-50 text-xs"
+                                        >
+                                          <Flag id={s.id} />
+                                          <span className="font-semibold text-stone-700">
+                                            {tm ? tm.name : s.id}
+                                          </span>
+                                          <span className="text-stone-500">
+                                            out before QF
+                                          </span>
+                                          <span className="font-mono font-bold text-rose-700">
+                                            {pct(s.cond)}
+                                          </span>
+                                        </span>
+                                      );
+                                    })}
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          )}
                       </div>
                     )}
                   </div>
