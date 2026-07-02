@@ -2899,6 +2899,47 @@ function ForecastView({ live, locked, results }) {
                             ))}
                           </div>
                         </div>
+                        {e.winScenario && e.winScenario.length > 0 && (
+                          <div className="mt-2 pt-2 border-t border-stone-100">
+                            <div className="flex items-center justify-between mb-1.5">
+                              <span className="text-[11px] font-bold uppercase tracking-wide text-stone-400">
+                                Keys to winning
+                              </span>
+                              <span className="text-xs font-mono text-stone-400">
+                                {pct(e.winProb)} win
+                              </span>
+                            </div>
+                            <p className="text-[11px] text-stone-400 mb-1.5">
+                              What usually happens in the sims where {e.name}{" "}
+                              takes the pool.
+                            </p>
+                            <div className="flex flex-wrap gap-1.5">
+                              {e.winScenario.map((s) => {
+                                const tm = ALL_TEAMS[s.id];
+                                return (
+                                  <span
+                                    key={s.id}
+                                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg border border-emerald-200 bg-emerald-50 text-xs"
+                                  >
+                                    <span className="font-mono text-[10px] text-stone-400">
+                                      T{tm ? tm.tier : "?"}
+                                    </span>
+                                    <Flag id={s.id} />
+                                    <span className="font-semibold text-stone-700">
+                                      {tm ? tm.name : s.id}
+                                    </span>
+                                    <span className="text-emerald-700">
+                                      {s.stage}
+                                    </span>
+                                    <span className="font-mono text-stone-400">
+                                      {Math.round(s.stageProb * 100)}%
+                                    </span>
+                                  </span>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>

@@ -763,8 +763,10 @@ export function projectTournament(opts) {
         ggdSum: 0,
       })
   );
-  // Per-entry accumulators.
-  const eAcc = entries.map(() => ({ totalSum: 0, wins: 0 }));
+  // Per-entry accumulators. `cond` accumulates, only over the sims where THIS
+  // entry wins the pool, how far each of its teams advanced and how many points
+  // it scored — so we can later describe the scenario that carries the entry.
+  const eAcc = entries.map(() => ({ totalSum: 0, wins: 0, cond: {} }));
   // Per-knockout-slot occupancy, filled by simulateOnce each run.
   const bracketAcc = {};
 
@@ -805,7 +807,27 @@ export function projectTournament(opts) {
       totals.forEach((t, i) => {
         if (t === best) leaders.push(i);
       });
-      leaders.forEach((i) => (eAcc[i].wins += 1 / leaders.length));
+      const wgt = leaders.length ? 1 / leaders.length : 0; // split a tie for first
+      leaders.forEach((i) => {
+        eAcc[i].wins += wgt;
+        // Record, for this winning sim, each owned team's deepest stage and its
+        // points — the raw material for "what happened when this entry won".
+        const cond = eAcc[i].cond;
+        entries[i].ids.forEach((id) => {
+          const r = res[id];
+          if (!r) return;
+          const c =
+            cond[id] ||
+            (cond[id] = { champ: 0, final: 0, sf: 0, qf: 0, r16: 0, adv: 0, pts: 0 });
+          if (r.ko.f) c.champ += wgt; // won final => champion
+          if (r.ko.sf) c.final += wgt; // won SF => reached final
+          if (r.ko.qf) c.sf += wgt; // won QF => reached SF
+          if (r.ko.r16) c.qf += wgt; // won R16 => reached QF
+          if (r.ko.r32) c.r16 += wgt; // won R32 => reached R16
+          if (r.finish !== "out") c.adv += wgt; // reached the knockout stage
+          c.pts += wgt * (ptsByTeam[id] || 0);
+        });
+      });
     }
   }
 
@@ -847,11 +869,58 @@ export function projectTournament(opts) {
         ),
     }));
 
-  const entryOut = entries.map((e, i) => ({
-    name: e.name,
-    projTotal: eAcc[i].totalSum / sims,
-    winProb: eAcc[i].wins / sims,
-  }));
+  // Deepest stage a team reaches (conditional on the entry winning) with at
+  // least even odds, paired with a human label. Stages are nested, so the first
+  // that clears 0.5 is the "typical" outcome; if nothing does, report advancement.
+  const STAGE_LABELS = [
+    ["champ", "wins cup"],
+    ["final", "reaches final"],
+    ["sf", "reaches SF"],
+    ["qf", "reaches QF"],
+    ["r16", "reaches R16"],
+    ["adv", "advances"],
+  ];
+  const entryOut = entries.map((e, i) => {
+    const cw = eAcc[i].wins;
+    const cond = eAcc[i].cond;
+    // Characterize wins only when there are enough of them for stable fractions.
+    const winScenario =
+      cw >= 3
+        ? e.ids
+            .map((id) => {
+              const c = cond[id] || {};
+              const probs = {
+                champ: (c.champ || 0) / cw,
+                final: (c.final || 0) / cw,
+                sf: (c.sf || 0) / cw,
+                qf: (c.qf || 0) / cw,
+                r16: (c.r16 || 0) / cw,
+                adv: (c.adv || 0) / cw,
+              };
+              const head =
+                STAGE_LABELS.find(([k]) => probs[k] >= 0.5) ||
+                ["adv", "advances"];
+              const base = teams[id] ? teams[id].projPts : 0;
+              return {
+                id,
+                stage: head[1],
+                stageProb: probs[head[0]],
+                // How much more this team scores when the entry wins vs. on
+                // average — the bigger the swing, the more the win hinges on it.
+                swing: (c.pts || 0) / cw - base,
+              };
+            })
+            // The teams whose overperformance most drives the entry's wins.
+            .sort((a, b) => b.swing - a.swing)
+            .slice(0, 3)
+        : [];
+    return {
+      name: e.name,
+      projTotal: eAcc[i].totalSum / sims,
+      winProb: cw / sims,
+      winScenario,
+    };
+  });
 
   // The projected bracket: for each knockout match, the full distribution of
   // teams that could fill each seat (sorted most- to least-likely, with each
