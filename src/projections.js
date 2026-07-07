@@ -939,9 +939,25 @@ export function projectTournament(opts) {
                 r16: (c.r16 || 0) / cw,
                 adv: (c.adv || 0) / cw,
               };
-              const head =
-                STAGE_LABELS.find(([k]) => probs[k] >= 0.5) ||
-                ["adv", "advances"];
+              // Show the deepest stage the team still-typically reaches (≥50%),
+              // but skip any stage already GUARANTEED by real results — a banked
+              // QF sits at 100% in every sim and tells you nothing. When the
+              // typical stage is already banked, surface the live next step up
+              // instead (a team locked into the QF → its still-open shot at the
+              // SF), so the key stays a differentiator rather than a settled fact.
+              const GUARANTEED = 0.999;
+              let head = STAGE_LABELS.find(
+                ([k]) => probs[k] >= 0.5 && probs[k] < GUARANTEED
+              );
+              if (!head) {
+                // deepest stage already locked in (STAGE_LABELS is deepest-first)
+                const bi = STAGE_LABELS.findIndex(([k]) => probs[k] >= GUARANTEED);
+                if (bi > 0 && probs[STAGE_LABELS[bi - 1][0]] > 0)
+                  head = STAGE_LABELS[bi - 1]; // banked here, still alive one deeper
+                else if (bi >= 0)
+                  head = STAGE_LABELS[bi]; // banked and can't go further (or champs)
+                else head = ["adv", "advances"]; // nothing typical, nothing banked
+              }
               const base = teams[id] ? teams[id].projPts : 0;
               return {
                 id,
