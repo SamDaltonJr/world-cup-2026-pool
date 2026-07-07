@@ -594,6 +594,19 @@ const STAGE_LABELS = {
   FINAL: "Final",
 };
 
+// Compact round labels for tight spots (e.g. the swing-games list).
+const STAGE_SHORT = {
+  LAST_32: "R32",
+  ROUND_OF_32: "R32",
+  LAST_16: "R16",
+  ROUND_OF_16: "R16",
+  QUARTER_FINALS: "QF",
+  SEMI_FINALS: "SF",
+  THIRD_PLACE: "3rd place",
+  PLAY_OFF_FOR_THIRD_PLACE: "3rd place",
+  FINAL: "Final",
+};
+
 function timeAgo(iso) {
   if (!iso) return "";
   const ms = Date.now() - new Date(iso).getTime();
@@ -3028,6 +3041,92 @@ function ForecastView({ live, locked, results }) {
                               )}
                             </div>
                           )}
+                        {e.swings && e.swings.length > 0 && (
+                          <div className="mt-2 pt-2 border-t border-stone-100">
+                            <div className="flex items-center justify-between mb-1.5">
+                              <span className="text-[11px] font-bold uppercase tracking-wide text-stone-400">
+                                Swing games
+                              </span>
+                              <span className="text-xs font-mono text-stone-400">
+                                {pct(e.winProb)} now
+                              </span>
+                            </div>
+                            <p className="text-[11px] text-stone-400 mb-1.5">
+                              How each upcoming game&apos;s result moves your
+                              odds. Muted % = that result&apos;s chance; bold % =
+                              your win odds if it happens.
+                            </p>
+                            {e.swings.map((g) => {
+                              const outcomes = [
+                                {
+                                  id: g.home,
+                                  adv: g.homeAdvP,
+                                  win: g.winIfHome,
+                                },
+                                {
+                                  id: g.away,
+                                  adv: g.awayAdvP,
+                                  win: g.winIfAway,
+                                },
+                              ];
+                              return (
+                                <div key={g.id} className="mb-1.5 last:mb-0">
+                                  <div className="text-[10px] font-mono text-stone-400 mb-0.5">
+                                    {STAGE_SHORT[g.stage] || "KO"} ·{" "}
+                                    {ALL_TEAMS[g.home]
+                                      ? ALL_TEAMS[g.home].name
+                                      : g.home}{" "}
+                                    v{" "}
+                                    {ALL_TEAMS[g.away]
+                                      ? ALL_TEAMS[g.away].name
+                                      : g.away}
+                                  </div>
+                                  <div className="flex flex-wrap gap-1.5">
+                                    {outcomes.map((o) => {
+                                      const good = o.win >= e.winProb;
+                                      const tm = ALL_TEAMS[o.id];
+                                      return (
+                                        <span
+                                          key={o.id}
+                                          className={
+                                            "inline-flex items-center gap-1 px-2 py-0.5 rounded-lg border text-xs " +
+                                            (good
+                                              ? "border-emerald-200 bg-emerald-50"
+                                              : "border-rose-200 bg-rose-50")
+                                          }
+                                        >
+                                          <Flag id={o.id} />
+                                          <span className="font-semibold text-stone-700">
+                                            {tm ? tm.name : o.id}
+                                          </span>
+                                          <span className="text-stone-500">
+                                            wins
+                                          </span>
+                                          <span className="font-mono text-stone-400">
+                                            {pct(o.adv)}
+                                          </span>
+                                          <span className="font-mono text-stone-300">
+                                            →
+                                          </span>
+                                          <span
+                                            className={
+                                              "font-mono font-bold " +
+                                              (good
+                                                ? "text-emerald-700"
+                                                : "text-rose-700")
+                                            }
+                                          >
+                                            {o.win < 0.005 ? "<1%" : pct(o.win)}
+                                          </span>
+                                        </span>
+                                      );
+                                    })}
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>

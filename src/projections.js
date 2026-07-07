@@ -667,6 +667,22 @@ function simulateOnce(elo, groups, koResults, koLive, teamIds, bracketAcc) {
   return res;
 }
 
+// Per knockout round, how to read a team's fate out of a finished sim: `reach`
+// = did it get to this round at all, `win` = did it advance past it. Keyed by
+// the feed's stage names. Used to resolve a specific fixture's result — and to
+// tell whether the two named teams actually met in this sim (both reached the
+// round and exactly one advanced), so we never invent a matchup that a given
+// simulation didn't actually produce.
+const KO_ROUND = {
+  LAST_32: { reach: (r) => r.finish !== "out", win: (r) => r.ko.r32 },
+  ROUND_OF_32: { reach: (r) => r.finish !== "out", win: (r) => r.ko.r32 },
+  LAST_16: { reach: (r) => r.ko.r32, win: (r) => r.ko.r16 },
+  ROUND_OF_16: { reach: (r) => r.ko.r32, win: (r) => r.ko.r16 },
+  QUARTER_FINALS: { reach: (r) => r.ko.r16, win: (r) => r.ko.qf },
+  SEMI_FINALS: { reach: (r) => r.ko.qf, win: (r) => r.ko.sf },
+  FINAL: { reach: (r) => r.ko.sf, win: (r) => r.ko.f },
+};
+
 // ---------- Public entry point ----------
 // opts: { live, resolveTeam, scorePoints, stageToKo, entries, sims }
 //   entries: [{ name, ids:[teamId,...] }] (optional) for pool-level projection.
@@ -783,6 +799,25 @@ export function projectTournament(opts) {
   // Per-knockout-slot occupancy, filled by simulateOnce each run.
   const bracketAcc = {};
 
+  // Upcoming knockout fixtures whose two teams are already known (the current
+  // frontier — e.g. the scheduled quarterfinals). For each we tally how often
+  // each side advances (global) and, per entry, that entry's tie-weighted win
+  // credit under each result — so we can show how a given game swings a given
+  // entry's odds. Empty until the bracket has concrete matchups (i.e. the KO
+  // rounds), which is exactly when this is relevant.
+  const pendingKo = [...predictions, ...liveGames]
+    .filter((m) => !m.isGroup && m.home && m.away && KO_ROUND[m.stage])
+    .map((m) => ({
+      id: m.id,
+      stage: m.stage,
+      home: m.home,
+      away: m.away,
+      homeName: m.homeName,
+      awayName: m.awayName,
+    }));
+  const fixAcc = pendingKo.map(() => ({ homeAdv: 0, awayAdv: 0 }));
+  const eFix = entries.map(() => pendingKo.map(() => ({ home: 0, away: 0 })));
+
   for (let s = 0; s < sims; s++) {
     const res = simulateOnce(elo, groups, koResults, koLive, teamIds, bracketAcc);
     const ptsByTeam = {};
@@ -817,6 +852,22 @@ export function projectTournament(opts) {
     });
 
     if (entries.length) {
+      // Resolve each pending fixture this sim. The two teams "met" only if both
+      // reached the round and exactly one advanced past it (one beat the other);
+      // otherwise this matchup didn't occur in this sim and we credit neither
+      // side. Returns true=home advanced, false=away, null=didn't meet.
+      const fixWinHome = pendingKo.map((fx, f) => {
+        const rd = KO_ROUND[fx.stage];
+        const rh = res[fx.home];
+        const ra = res[fx.away];
+        const hw = rd.win(rh);
+        const aw = rd.win(ra);
+        if (!rd.reach(rh) || !rd.reach(ra) || hw === aw) return null;
+        if (hw) fixAcc[f].homeAdv++;
+        else fixAcc[f].awayAdv++;
+        return hw;
+      });
+
       let best = -Infinity;
       const totals = entries.map((e) =>
         e.ids.reduce((sum, id) => sum + (ptsByTeam[id] || 0), 0)
@@ -831,6 +882,14 @@ export function projectTournament(opts) {
       });
       const wgt = leaders.length ? 1 / leaders.length : 0; // split a tie for first
       leaders.forEach((i) => {
+        // Credit this win to whichever side advanced — only in fixtures the two
+        // teams actually contested this sim (fixWinHome null means they didn't).
+        const ef = eFix[i];
+        pendingKo.forEach((fx, f) => {
+          if (fixWinHome[f] === null) return;
+          if (fixWinHome[f]) ef[f].home += wgt;
+          else ef[f].away += wgt;
+        });
         eAcc[i].wins += wgt;
         // Record, for this winning sim, each owned team's deepest stage and its
         // points — the raw material for "what happened when this entry won".
@@ -1004,12 +1063,49 @@ export function projectTournament(opts) {
           }
         : { baseline, for: [], against: [] };
 
+    // Swing games: how each upcoming fixture's result moves THIS entry's win
+    // odds. `winIfHome`/`winIfAway` are P(entry wins | that side advances); the
+    // spread between them is how much the game matters to this entry. Keep the
+    // few games that move the needle, biggest swing first.
+    const swings =
+      cw >= 3
+        ? pendingKo
+            .map((fx, f) => {
+              const hOcc = fixAcc[f].homeAdv;
+              const aOcc = fixAcc[f].awayAdv;
+              const meet = hOcc + aOcc; // sims in which the two teams actually met
+              // Only surface locked matchups — ones certain to be played (the
+              // immediate round). A projected future pairing rarely both-shows,
+              // so it self-excludes here rather than reporting a phantom game.
+              if (meet < sims * 0.99) return null;
+              const winIfHome = hOcc ? eFix[i][f].home / hOcc : 0;
+              const winIfAway = aOcc ? eFix[i][f].away / aOcc : 0;
+              return {
+                id: fx.id,
+                stage: fx.stage,
+                home: fx.home,
+                away: fx.away,
+                homeName: fx.homeName,
+                awayName: fx.awayName,
+                homeAdvP: hOcc / meet, // this side's chance to win the game
+                awayAdvP: aOcc / meet,
+                winIfHome, // P(entry wins the pool | home advances)
+                winIfAway,
+                spread: Math.abs(winIfHome - winIfAway),
+              };
+            })
+            .filter((g) => g && g.spread >= MIN_LIFT)
+            .sort((a, b) => b.spread - a.spread)
+            .slice(0, 3)
+        : [];
+
     return {
       name: e.name,
       projTotal: eAcc[i].totalSum / sims,
       winProb: cw / sims,
       winScenario,
       rooting,
+      swings,
     };
   });
 
